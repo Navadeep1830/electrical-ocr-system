@@ -1,0 +1,16 @@
+fastapi>=0.110.0
+uvicorn[standard]>=0.28.0
+sqlmodel>=0.0.16
+pydantic>=2.6.0
+pypdfium2>=4.28.0
+pillow>=10.2.0
+python-multipart>=0.0.9
+requests>=2.31.0
+aiofiles>=23.2.1
+pytesseract>=0.3.10
+torch>=2.2.0
+torchvision>=0.17.0
+transformers>=4.40.0
+accelerate>=0.28.0
+sentencepiece>=0.2.0
+qwen-vl-utils>=0.0.8
