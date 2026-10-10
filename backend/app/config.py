@@ -44,7 +44,11 @@ try:
 except ImportError:
     pass
 
-# Gemini Cloud Vision Configuration
+# Local vs Cloud Mode Configuration (Problem statement requires 100% free/local)
+FORCE_LOCAL_OCR = os.getenv("FORCE_LOCAL_OCR", "true").lower() in ("true", "1")
+
+# Gemini Cloud Vision Configuration (Optional if local mode is disabled)
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
+
 

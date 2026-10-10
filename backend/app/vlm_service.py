@@ -345,12 +345,12 @@ Your tasks:
    - "serial_number": Serial number or sample ID (e.g. 1098 or HVD25S0847)
    - "tests_requested": Tests requested or test category
    - "format_no": Document format number
-3. Reconstruct ALL measurement, calibration, and test data tables into clean, aligned Markdown tables with headers, units, and all numeric values preserved.
-4. Output a clean, complete full transcription with the structured tables included.
+3. Reconstruct ALL measurement, calibration, and test data tables into clean, aligned Markdown tables with their EXACT headers, units, and all numeric values preserved.
+4. Output a clean, complete full transcription with the structured tables included. Do NOT output placeholder headers like 'Column 1 | Column 2'. Use the actual headers from the text.
 
 Return a valid JSON object with EXACTLY this structure:
 {{
-  "document_type": "CUSTOMER_REQUEST_FORM", "LOGSHEET", "DATASHEET", "WORK_INSTRUCTION", or "GENERAL_DOCUMENT",
+  "document_type": "CUSTOMER_REQUEST_FORM", "PROFORMA_FOR_TRANSFORMERS", "LOGSHEET", "DATASHEET", "WORK_INSTRUCTION", or "GENERAL_DOCUMENT",
   "is_valid_crf": true or false,
   "format_no": "...",
   "customer_name": "...",
@@ -359,7 +359,7 @@ Return a valid JSON object with EXACTLY this structure:
   "rating_raw": "...",
   "serial_number": "...",
   "tests_requested": "...",
-  "structured_tables": "### Measurement Tables\\n\\n| Column 1 | Column 2 | ... |\\n|---|---|---|\\n| ... | ... | ... |",
+  "structured_tables": "### Measurement Tables\\n\\n| Header 1 | Header 2 | ... |\\n|---|---|---|\\n| ... | ... | ... |",
   "full_transcription": "Complete text with structured tables included."
 }}
 
@@ -371,10 +371,10 @@ CRITICAL: Return ONLY the valid JSON block without introductory or conversationa
                 "stream": False,
                 "format": "json",
                 "options": {
-                    "num_ctx": 4096,
+                    "num_ctx": 8192,
                     "temperature": 0.1,
                     "repeat_penalty": 1.2,
-                    "num_predict": 1024
+                    "num_predict": 3072
                 }
             }
             
@@ -489,18 +489,22 @@ CRITICAL: Return ONLY the valid JSON block without introductory or conversationa
         if structured_tables_md:
             final_payload["structured_tables"] = structured_tables_md
 
-        # Only query Coder LLM if structured tables are missing and tabular keywords exist in text
-        if not structured_tables_md and ("|" in full_raw_text or any(k in combined_text for k in ["sl.no", "voltage", "current", "loss", "temperature"])):
-            coder_data = self._query_local_coder_llm(full_raw_text)
-            if coder_data:
-                if coder_data.get("structured_tables"):
-                    structured_tables_md = str(coder_data["structured_tables"]).strip()
-                    final_payload["structured_tables"] = structured_tables_md
-                for field in ["customer_name", "rating_raw", "serial_number", "sample_name", "tests_requested"]:
-                    c_val = coder_data.get(field)
-                    if c_val and str(c_val).strip() and not str(c_val).strip().startswith("..."):
-                        if not final_payload.get(field) or len(str(final_payload.get(field)).strip()) < 3:
-                            final_payload[field] = str(c_val).strip()
+        # Always query local Qwen 2.5 Coder on GPU for table reconstruction & metadata structuring
+        coder_data = self._query_local_coder_llm(full_raw_text)
+        if coder_data:
+            if coder_data.get("structured_tables") and str(coder_data["structured_tables"]).strip():
+                structured_tables_md = str(coder_data["structured_tables"]).strip()
+                final_payload["structured_tables"] = structured_tables_md
+            for field in ["customer_name", "rating_raw", "serial_number", "sample_name", "tests_requested"]:
+                c_val = coder_data.get(field)
+                if isinstance(c_val, list):
+                    c_val = ", ".join([str(v) for v in c_val])
+                if c_val and str(c_val).strip() and not str(c_val).strip().startswith("..."):
+                    if not final_payload.get(field) or len(str(final_payload.get(field)).strip()) < 3:
+                        final_payload[field] = str(c_val).strip()
+            if coder_data.get("document_type") and coder_data["document_type"] != "GENERAL_DOCUMENT":
+                final_payload["document_type"] = coder_data["document_type"]
+                doc_type = coder_data["document_type"]
 
         # Step 6: Ensure electrical ratings are rigorously disaggregated
         raw_rating_text = (
@@ -556,37 +560,21 @@ CRITICAL: Return ONLY the valid JSON block without introductory or conversationa
 
         try:
             img = Image.open(image_path).convert("RGB")
-            # Downscale high-resolution scans to max dimension 1024 for VRAM stability & handwriting retention
-            img.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
 
             prompt = (
                 f"You are an expert document OCR and technical specification analysis AI.\n"
                 f"Analyze this electrical test / engineering document page (Page {page_num} of {total_pages}) with extreme accuracy.\n"
-                f"Carefully extract all printed text, handwritten entries (names, ratings, numbers), checkboxes ([√] or [ ]), and tables.\n"
+                f"Carefully extract all printed text, handwritten entries (names, ratings, numbers), checkboxes ([✓] or [ ]), and tables into clean Markdown.\n"
                 f"Pay special attention to resistance measurements, Ohms (Ω), milli-Ohms, micro-Ohms, voltage ratios, tap positions, currents, watts, and all numerical digits.\n"
-                f"CRITICAL: Do NOT invent placeholder dots ('...') or random bars ('|'). Output the exact text and numbers.\n\n"
-                f"Return a valid JSON object with the following fields:\n"
-                f"{{\n"
-                f'  "document_type": "CUSTOMER_REQUEST_FORM", "PROFORMA_FOR_TRANSFORMERS", "LOGSHEET", "DATASHEET", "WORK_INSTRUCTION", or "GENERAL_DOCUMENT",\n'
-                f'  "format_no": "Document format or issue number if visible, e.g. CPRI/QAF/01A or CPRI/QAF/12",\n'
-                f'  "customer_name": "Customer or manufacturer company name if visible on this page, else empty string",\n'
-                f'  "customer_address": "Customer address if visible, else empty string",\n'
-                f'  "sample_name": "Equipment or sample description (e.g. Distribution Transformer)",\n'
-                f'  "sample_description": "Additional sample description if visible",\n'
-                f'  "serial_number": "Serial number or sample code (e.g. 1098 or APT/250-11/001)",\n'
-                f'  "rating_raw": "Complete electrical rating string (e.g. 250 kVA, 11000/433V, 3Ph, 50Hz, Dyn11, ONAN)",\n'
-                f'  "tests_requested": "Tests requested or test table summary",\n'
-                f'  "tables_markdown": "Clean Markdown tables for any test tables, winding details, or parameter tables on this page, or empty string if none",\n'
-                f'  "transcription": "Complete verbatim markdown transcription of all text, handwriting, checkboxes, and tables on this page in natural reading order without random bars"\n'
-                f"}}\n"
-                f"Return ONLY valid JSON."
+                f"List all fields with their handwritten values. For tables, format in clean Markdown tables.\n"
+                f"Do NOT invent placeholder dots ('...') or generate repetitive empty table cells or endless pipe symbols.\n"
             )
 
             messages = [
                 {
                     "role": "user",
                     "content": [
-                        {"type": "image", "image": img},
+                        {"type": "image", "image": img, "max_pixels": 1400 * 1400},
                         {"type": "text", "text": prompt}
                     ]
                 }
@@ -609,9 +597,9 @@ CRITICAL: Return ONLY the valid JSON block without introductory or conversationa
             with torch.no_grad():
                 generated_ids = self.model.generate(
                     **inputs,
-                    max_new_tokens=1800,
-                    temperature=0.1,
+                    max_new_tokens=1600,
                     do_sample=False,
+                    repetition_penalty=1.2,
                 )
 
             generated_ids_trimmed = [
@@ -623,11 +611,26 @@ CRITICAL: Return ONLY the valid JSON block without introductory or conversationa
                 clean_up_tokenization_spaces=False
             )[0]
 
+            # Clean any trailing repetitive pipe sequences
+            output_text = re.sub(r'(\|\s*){3,}', ' ', output_text).strip()
+
             logger.info(f"Page {page_num} VLM inference completed ({len(output_text)} chars generated)")
-            return self._parse_json_from_text(output_text)
+
+            # Try parsing JSON if model returned JSON
+            parsed = self._parse_json_from_text(output_text)
+            if parsed:
+                return parsed
+
+            # If model returned direct Markdown / text, wrap it cleanly so high-quality transcription is preserved
+            return {
+                "transcription": output_text,
+                "tables_markdown": output_text if "|" in output_text else "",
+                "full_transcription": output_text
+            }
         except Exception as err:
             logger.error(f"Error in VLM page {page_num} inference: {err}")
             return None
+
 
     def _infer_vlm(self, page_image_paths: List[str]) -> Optional[Dict[str, Any]]:
         """Run page-by-page visual inference with Qwen2.5-VL and merge results."""

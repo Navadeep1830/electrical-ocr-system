@@ -19,7 +19,7 @@ import pypdfium2 as pdfium
 
 from app.config import (
     UPLOAD_DIR, PAGES_DIR, STATIC_DIR, DB_PATH, PDF_RENDER_DPI,
-    HOST, PORT, VLM_MODEL_ID
+    HOST, PORT, VLM_MODEL_ID, FORCE_LOCAL_OCR
 )
 from app.database import init_db, get_session
 from app.models import FormRecord, FormPage
@@ -186,7 +186,7 @@ def process_and_save_document(
     embedded_texts = {p["page_number"]: p.get("embedded_text", "") for p in rendered_pages}
 
     extraction: Optional[FormExtractionData] = None
-    if gemini_service.is_available():
+    if not FORCE_LOCAL_OCR and gemini_service.is_available():
         try:
             logger.info("Executing Gemini 3.8 Flash high-precision document and table extraction...")
             extraction = gemini_service.extract_document(page_img_paths)
@@ -194,6 +194,7 @@ def process_and_save_document(
             logger.warning(f"Gemini service extraction failed: {exc}. Falling back to local VLM engine.")
 
     if not extraction:
+        logger.info("Executing 100% Free & Local GPU Pipeline (Qwen2.5-VL + Ollama Qwen2.5-Coder)...")
         extraction = vlm_engine.extract_document(page_img_paths, embedded_texts=embedded_texts)
 
     # Disaggregate ratings
@@ -384,8 +385,9 @@ def get_system_health():
         },
         "vlm_engine": vlm_stat,
         "trocr_service": trocr_stat,
+        "local_mode": FORCE_LOCAL_OCR,
         "gemini_service": {
-            "available": gemini_service.is_available(),
+            "available": gemini_service.is_available() and not FORCE_LOCAL_OCR,
             "model": gemini_service.model
         }
     }
