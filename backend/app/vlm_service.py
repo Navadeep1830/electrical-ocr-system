@@ -16,53 +16,55 @@ logger = logging.getLogger("vlm_service")
 logging.basicConfig(level=logging.INFO)
 
 
-VLM_SYSTEM_PROMPT = """You are an expert electrical engineer and forensic document analyzer.
-Your task is to analyze scanned CPRI (Central Power Research Institute) Customer Request Forms (format CPRI/QAF/01A).
-Carefully read both printed text and handwritten entries across all sheets.
-Disaggregate and extract every specification with extreme accuracy into a clean JSON object.
+VLM_SYSTEM_PROMPT = """You are an expert document OCR and forensic document analysis AI.
+Your task is to analyze and extract text from this document with extreme accuracy.
+Carefully read ALL printed text, tabular columns, headers, check marks, and all handwritten notes/entries across all pages.
+CRITICAL: Do NOT output placeholder dots like '...'. If text or handwriting is present, transcribe the exact words into the field.
 
-Extract into this exact JSON structure:
-{
-  "format_no": "CPRI/QAF/01A",
-  "issue_no": "02",
-  "revision_no": "00",
-  "division_name": "SHORT CIRCUIT LABORATORY",
-  "customer_name": "...",
-  "customer_address": "...",
-  "sample_name": "...",
-  "rating_raw": "...",
-  "sample_description": "...",
-  "sample_type": "...",
-  "serial_number": "...",
-  "manufacturer_details": "...",
-  "drawing_number": "...",
-  "customer_requirement": "...",
-  "evaluation_criteria": "...",
-  "number_of_samples": "...",
-  "sample_disposal": "...",
-  "tests_requested": "...",
-  "specific_instructions": "...",
-  "customer_representative": "...",
-  "witness_other": "...",
-  "report_dispatch_to": "...",
-  "report_dispatch_mode": "...",
-  "additional_reports": "...",
-  "msme_discount": "Applicable or Not Applicable",
-  "conformity_required": true,
-  "conformity_rule": "...",
-  "physical_condition_sample": "Suitable for Testing or Not suitable",
-  "lab_capability": "Yes or No",
-  "test_engineer_name": "...",
-  "deviations_noticed": "...",
-  "confidence_scores": {
-    "customer_name": 0.95,
-    "rating_raw": 0.92,
-    "serial_number": 0.90,
-    "manufacturer_details": 0.88,
-    "tests_requested": 0.91,
-    "conformity_rule": 0.89
-  }
-}
+Return a valid JSON object with the following fields:
+1. "document_type": "CUSTOMER_REQUEST_FORM" if format CPRI/QAF/01A, "WORK_INSTRUCTION" if work instruction, "LOGSHEET" if log sheet, "DATASHEET" if datasheet, or "GENERAL_DOCUMENT".
+2. "is_valid_crf": true if standard CPRI Customer Request Form (CPRI/QAF/01A), else false.
+3. If CPRI Customer Request Form (CPRI/QAF/01A), transcribe all handwritten and printed values:
+   "format_no": "CPRI/QAF/01A",
+   "issue_no": "02",
+   "revision_no": "00",
+   "division_name": "SHORT CIRCUIT LABORATORY",
+   "customer_name": "Transcribe exact customer company name from Sheet 1, e.g. A.P. TRANSFORMERS",
+   "customer_address": "Transcribe customer address from Sheet 1",
+   "sample_name": "Transcribe sample name, e.g. Distribution Transformer",
+   "rating_raw": "Transcribe complete electrical rating string, e.g. 250 KVA/11kV/433V, 3PH, 50Hz Copperwound",
+   "sample_description": "Transcribe sample description",
+   "sample_type": "Transcribe type/indoor/outdoor",
+   "serial_number": "Transcribe serial number, e.g. APT/250-11/001 or 1098",
+   "manufacturer_details": "Transcribe manufacturer details",
+   "drawing_number": "Transcribe drawing number",
+   "customer_requirement": "Customer requirement standard or specification",
+   "evaluation_criteria": "Evaluation criteria standard",
+   "number_of_samples": "Number of samples",
+   "sample_disposal": "Taking back the sample after testing",
+   "tests_requested": "Transcribe tests requested, e.g. Type test",
+   "specific_instructions": "Specific testing instructions",
+   "customer_representative": "Name of customer representative",
+   "witness_other": "Witness details if any",
+   "report_dispatch_to": "Report dispatch address",
+   "report_dispatch_mode": "Report dispatch mode",
+   "additional_reports": "Additional reports required",
+   "msme_discount": "Applicable or Not Applicable",
+   "conformity_required": true,
+   "conformity_rule": "Conformity rule statement",
+   "physical_condition_sample": "Suitable for Testing",
+   "lab_capability": "Yes",
+   "test_engineer_name": "Name of test engineer",
+   "deviations_noticed": "Any deviations noticed",
+   "confidence_scores": {
+     "customer_name": 0.95,
+     "rating_raw": 0.95,
+     "serial_number": 0.90,
+     "manufacturer_details": 0.88,
+     "tests_requested": 0.92,
+     "conformity_rule": 0.90
+   },
+4. "full_transcription": "Complete verbatim transcription of all text, handwriting, and tables across all pages in natural reading order."
 
 Return ONLY the valid JSON block without introductory or concluding conversational text."""
 
@@ -203,32 +205,86 @@ class VLMInferenceEngine:
         finally:
             self.loading_in_progress = False
 
-    def extract_document(self, page_image_paths: List[str]) -> FormExtractionData:
+    def _run_enhanced_ocr(self, image_path: str) -> str:
+        """Run adaptive multi-pass OCR using PIL/OpenCV for maximum accuracy."""
+        try:
+            import cv2
+            img = Image.open(image_path)
+            # Pass 1: Standard PSM 3 (auto page segmentation)
+            text_p3 = pytesseract.image_to_string(img, config="--oem 1 --psm 3").strip()
+            
+            # Pass 2: Grayscale with CLAHE contrast enhancement for low-contrast/faded scans
+            try:
+                cv_img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+                if cv_img is not None:
+                    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+                    enhanced = clahe.apply(cv_img)
+                    text_p6 = pytesseract.image_to_string(enhanced, config="--oem 1 --psm 6").strip()
+                    if len(text_p6) > len(text_p3) * 1.15:
+                        return text_p6
+            except Exception:
+                pass
+            return text_p3 if text_p3 else pytesseract.image_to_string(img, config="--oem 1 --psm 6").strip()
+        except Exception as err:
+            logger.warning(f"OCR failed for {image_path}: {err}")
+            return ""
+
+    def extract_document(
+        self, 
+        page_image_paths: List[str],
+        embedded_texts: Optional[Dict[int, str]] = None
+    ) -> FormExtractionData:
         """Extract all structured fields from document page images using VLM or fallback OCR."""
         if not page_image_paths:
             return FormExtractionData()
 
-        # Step 1: Execute OCR on each page (also used for fallback and spatial context)
+        # Step 1: Execute OCR or use native embedded PDF text
         page_texts: List[str] = []
         page_dict: Dict[int, str] = {}
         for idx, path in enumerate(page_image_paths):
+            page_num = idx + 1
+            if embedded_texts and embedded_texts.get(page_num) and len(embedded_texts[page_num].strip()) > 30:
+                p_text = embedded_texts[page_num].strip()
+            else:
+                p_text = self._run_enhanced_ocr(path)
+            page_texts.append(p_text)
+            page_dict[page_num] = p_text
+
+        # Step 2: Attempt VLM inference if model is ready
+        vlm_data: Optional[Dict[str, Any]] = None
+        if self.is_loaded and self.model is not None and self.processor is not None:
             try:
-                img = Image.open(path)
-                ocr_str = pytesseract.image_to_string(img, config="--psm 6")
-                page_texts.append(ocr_str)
-                page_dict[idx + 1] = ocr_str.strip()
-            except Exception as ocr_err:
-                logger.warning(f"OCR failed for {path}: {ocr_err}")
-                page_texts.append("")
-                page_dict[idx + 1] = ""
+                vlm_data = self._infer_vlm(page_image_paths)
+            except Exception as vlm_err:
+                logger.error(f"VLM inference encountered error: {vlm_err}. Falling back to rule-based engine.")
+
+        # If VLM provided page-by-page transcriptions, integrate them for highest accuracy
+        if vlm_data and vlm_data.get("page_transcriptions"):
+            page_trans = vlm_data["page_transcriptions"]
+            for idx in range(len(page_image_paths)):
+                page_num = idx + 1
+                v_text = page_trans.get(str(page_num)) or page_trans.get(page_num)
+                if v_text and len(str(v_text).strip()) > 30:
+                    page_dict[page_num] = str(v_text).strip()
+            page_texts = [page_dict[i + 1] for i in range(len(page_image_paths))]
 
         full_raw_text = "\n\n=== SHEET BREAK ===\n\n".join(
-            [f"--- SHEET {i+1} ---\n{t}" for i, t in enumerate(page_texts)]
+            [f"--- SHEET {i+1} ---\n{page_dict[i+1]}" for i in range(len(page_image_paths))]
         )
+
+        if vlm_data and vlm_data.get("full_transcription") and len(str(vlm_data["full_transcription"]).strip()) > len(full_raw_text):
+            full_raw_text = str(vlm_data["full_transcription"]).strip()
 
         # Document Classification & Validation
         combined_text = full_raw_text.lower()
-        if "customer request form" in combined_text or "cpri/qaf/01a" in combined_text:
+        if vlm_data and "document_type" in vlm_data and vlm_data["document_type"] in ("CUSTOMER_REQUEST_FORM", "WORK_INSTRUCTION", "LOGSHEET", "DATASHEET"):
+            doc_type = vlm_data["document_type"]
+            is_valid_crf = vlm_data.get("is_valid_crf", doc_type == "CUSTOMER_REQUEST_FORM")
+            if is_valid_crf:
+                val_msg = "Valid CPRI/QAF/01A Customer Request Form detected. Field identification active."
+            else:
+                val_msg = f"Document identified as {doc_type.replace('_', ' ').title()}. It does not contain standard Customer Request Form fields."
+        elif "customer request form" in combined_text or "cpri/qaf/01a" in combined_text:
             doc_type = "CUSTOMER_REQUEST_FORM"
             is_valid_crf = True
             val_msg = "Valid CPRI/QAF/01A Customer Request Form detected. Field identification active."
@@ -249,14 +305,6 @@ class VLMInferenceEngine:
             is_valid_crf = False
             val_msg = "This document does not match standard CPRI Customer Request Form (CPRI/QAF/01A) fields. Raw text extracted below."
 
-        # Step 2: Attempt VLM inference if model is ready
-        vlm_data: Optional[Dict[str, Any]] = None
-        if self.is_loaded and self.model is not None and self.processor is not None:
-            try:
-                vlm_data = self._infer_vlm(page_image_paths)
-            except Exception as vlm_err:
-                logger.error(f"VLM inference encounter error: {vlm_err}. Falling back to rule-based engine.")
-
         # Step 3: Rule-based extraction from OCR
         rule_data = FormLayoutRuleParser.extract_from_ocr_pages(page_texts)
 
@@ -270,6 +318,22 @@ class VLMInferenceEngine:
             f"{final_payload.get('sample_type', '')}"
         )
         final_payload["ratings"] = ElectricalRatingParser.parse_ratings(raw_rating_text)
+
+        # Prepend clean identified summary to Sheet 1 text if valid CRF
+        if is_valid_crf and final_payload.get("customer_name"):
+            header_summary = (
+                f"[IDENTIFIED CPRI CRF FIELDS]\n"
+                f"Customer Name: {final_payload.get('customer_name')}\n"
+                f"Rating: {final_payload.get('rating_raw')}\n"
+                f"Sample: {final_payload.get('sample_name') or final_payload.get('sample_description')}\n"
+                f"Serial Number: {final_payload.get('serial_number')}\n"
+                f"Tests Requested: {final_payload.get('tests_requested')}\n"
+                f"{'=' * 45}\n\n"
+            )
+            if header_summary not in full_raw_text:
+                full_raw_text = header_summary + full_raw_text
+            if 1 in page_dict and header_summary not in page_dict[1]:
+                page_dict[1] = header_summary + page_dict[1]
 
         # Attach raw text and document validation
         final_payload["document_type"] = doc_type
@@ -300,7 +364,7 @@ class VLMInferenceEngine:
                 content.append({"type": "image", "image": img})
             content.append({
                 "type": "text",
-                "text": "Analyze all pages of this CPRI Customer Request Form and extract all information into JSON as requested."
+                "text": "Analyze all pages of this document. Transcribe the text verbatim and extract all actual handwritten and printed values into the JSON fields. Do not output placeholder dots ('...')."
             })
 
             messages = [
@@ -351,23 +415,51 @@ class VLMInferenceEngine:
             return self._parse_json_from_text(output_text)
 
     def _parse_json_from_text(self, text: str) -> Optional[Dict[str, Any]]:
-        """Extract and parse JSON object from markdown block or raw text."""
-        # Check ```json ... ```
-        match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', text)
+        """Extract and parse JSON object from markdown block or raw text with repair support."""
+        # 1. Extract JSON candidate block
+        candidate = None
+        match = re.search(r'```(?:json)?\s*([\s\S]*?)(?:```|$)', text)
         if match:
             candidate = match.group(1).strip()
+        else:
+            first_brace = text.find('{')
+            if first_brace != -1:
+                candidate = text[first_brace:].strip()
+
+        if not candidate:
+            return None
+
+        # 2. Try direct parse
+        try:
+            return json.loads(candidate)
+        except Exception:
+            pass
+
+        # 3. Try standard regex curly bracket match
+        curly_match = re.search(r'\{[\s\S]*\}', candidate)
+        if curly_match:
             try:
-                return json.loads(candidate)
-            except json.JSONDecodeError:
+                return json.loads(curly_match.group(0))
+            except Exception:
                 pass
 
-        # Check raw curly brackets { ... }
-        match = re.search(r'\{[\s\S]*\}', text)
-        if match:
+        # 4. Truncated JSON repair: step backwards through lines, balance quotes and braces
+        lines = candidate.splitlines()
+        for i in range(len(lines), 0, -1):
+            sub_str = "\n".join(lines[:i]).strip()
+            sub_str = re.sub(r',\s*$', '', sub_str)
+            if sub_str.count('"') % 2 != 0:
+                sub_str += '"'
+            sub_str = re.sub(r',\s*$', '', sub_str)
+            open_curly = sub_str.count('{') - sub_str.count('}')
+            open_square = sub_str.count('[') - sub_str.count(']')
+            fixed = sub_str + (']' * max(0, open_square)) + ('}' * max(0, open_curly))
             try:
-                return json.loads(match.group(0))
-            except json.JSONDecodeError:
-                pass
+                parsed = json.loads(fixed)
+                logger.info(f"Successfully repaired truncated VLM JSON ({len(parsed)} keys recovered)")
+                return parsed
+            except Exception:
+                continue
 
         return None
 

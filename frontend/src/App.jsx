@@ -1,11 +1,11 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { 
   FileText, Upload, FolderUp, CheckCircle, AlertTriangle, 
-  Cpu, ArrowLeft, RefreshCw, Zap, Shield, Search, Database, HardDrive, Check
+  Cpu, ArrowLeft, RefreshCw, Zap, Shield, Search, Database, HardDrive, Check, Trash2
 } from 'lucide-react';
 import { 
   getHealth, getRecords, getRecord, uploadDocument, 
-  processExistingFile, deleteRecord, batchScan, triggerVlmLoad 
+  processExistingFile, deleteRecord, clearAllRecords, batchScan, triggerVlmLoad 
 } from './api';
 import DocumentViewer from './components/DocumentViewer';
 import FormEditor from './components/FormEditor';
@@ -23,10 +23,11 @@ export default function App() {
   // Modals & Upload state
   const [uploadProgress, setUploadProgress] = useState(0);
   const [isUploading, setIsUploading] = useState(false);
+  const [isDragging, setIsDragging] = useState(false);
   const [showScanModal, setShowScanModal] = useState(false);
   const [showBatchModal, setShowBatchModal] = useState(false);
-  const [localFilePath, setLocalFilePath] = useState('/home/navadeep/Downloads/Track 3 - AT RG/Customer request form.pdf');
-  const [localFolderPath, setLocalFolderPath] = useState('/home/navadeep/Downloads/Track 3 - AT RG');
+  const [localFilePath, setLocalFilePath] = useState('');
+  const [localFolderPath, setLocalFolderPath] = useState('');
   const [modalMessage, setModalMessage] = useState({ text: '', type: '' });
 
   const fileInputRef = useRef(null);
@@ -88,25 +89,43 @@ export default function App() {
     }
   };
 
-  const handleFileUpload = async (e) => {
-    const file = e.target.files?.[0];
+  const processFile = async (file) => {
     if (!file) return;
-
     try {
       setIsUploading(true);
-      setUploadProgress(10);
+      setUploadProgress(15);
       const record = await uploadDocument(file, (progressEvent) => {
-        const percent = Math.round((progressEvent.loaded * 100) / progressEvent.total);
-        setUploadProgress(percent);
+        if (progressEvent.total) {
+          const percent = Math.round((progressEvent.loaded * 100) / progressEvent.total);
+          setUploadProgress(percent);
+        }
       });
       fetchRecords();
       handleSelectRecord(record);
     } catch (err) {
-      alert('Upload failed: ' + (err.response?.data?.detail || err.message));
+      alert('Upload & OCR extraction failed: ' + (err.response?.data?.detail || err.message));
     } finally {
       setIsUploading(false);
       setUploadProgress(0);
       if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  };
+
+  const handleFileUpload = (e) => {
+    const file = e.target.files?.[0];
+    if (file) processFile(file);
+  };
+
+  const handleClearAll = async () => {
+    try {
+      setLoading(true);
+      await clearAllRecords();
+      setSelectedRecord(null);
+      await fetchRecords();
+    } catch (err) {
+      alert('Failed to clear records: ' + (err.message || 'error'));
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -304,25 +323,59 @@ export default function App() {
               </div>
             </div>
 
-            {/* Quick Ingestion Action Banner */}
-            <div className="p-4 bg-gradient-to-r from-sky-950/50 via-slate-900 to-indigo-950/50 border border-sky-800/30 rounded-xl flex flex-col md:flex-row items-center justify-between gap-4">
-              <div>
-                <h3 className="font-semibold text-sm text-slate-100 flex items-center space-x-2">
-                  <span>⚡ Quick Ingest: Track 3 Customer Request Form</span>
-                </h3>
-                <p className="text-xs text-slate-400 mt-0.5">
-                  Directly load and extract the PowerNext dataset file: <code className="text-sky-300 font-mono text-[11px]">/home/navadeep/Downloads/Track 3 - AT RG/Customer request form.pdf</code>
-                </p>
+            {/* Dedicated Drag-and-Drop Upload Area */}
+            <div
+              onDragOver={(e) => {
+                e.preventDefault();
+                setIsDragging(true);
+              }}
+              onDragLeave={(e) => {
+                e.preventDefault();
+                setIsDragging(false);
+              }}
+              onDrop={(e) => {
+                e.preventDefault();
+                setIsDragging(false);
+                const file = e.dataTransfer.files?.[0];
+                if (file) {
+                  processFile(file);
+                }
+              }}
+              onClick={() => fileInputRef.current?.click()}
+              className={`p-8 border-2 border-dashed rounded-2xl cursor-pointer transition-all flex flex-col items-center justify-center text-center group ${
+                isDragging
+                  ? 'border-sky-400 bg-sky-950/40 shadow-xl shadow-sky-500/10 scale-[1.01]'
+                  : 'border-slate-700/80 hover:border-sky-500/80 bg-slate-900/60 hover:bg-slate-900/90 shadow-lg'
+              }`}
+            >
+              <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-sky-600/30 to-indigo-600/30 border border-sky-500/40 flex items-center justify-center mb-3 group-hover:scale-110 transition duration-300 shadow-lg shadow-sky-600/20">
+                <Upload className="w-7 h-7 text-sky-400" />
               </div>
-              <button
-                onClick={() => {
-                  setLocalFilePath('/home/navadeep/Downloads/Track 3 - AT RG/Customer request form.pdf');
-                  setShowScanModal(true);
-                }}
-                className="px-4 py-2 bg-sky-600 hover:bg-sky-500 text-white rounded-lg text-xs font-semibold shadow-md transition shrink-0"
-              >
-                Scan Target Document
-              </button>
+              <h3 className="text-base font-semibold text-slate-100 tracking-tight">
+                {isUploading ? `Extracting Text... (${uploadProgress}%)` : 'Upload Any PDF Document to Extract Text'}
+              </h3>
+              <p className="text-xs text-slate-400 mt-1 max-w-lg">
+                Drag and drop your PDF here, or click to browse. The air-gapped Qwen2.5-VL & OCR engine will automatically transcribe printed text, handwritten notes, and tables with maximum accuracy.
+              </p>
+              <div className="flex flex-wrap items-center justify-center gap-2.5 mt-4">
+                <span className="px-2.5 py-1 bg-slate-800 text-slate-300 rounded-lg text-[11px] font-mono border border-slate-700">
+                  PDF, PNG, JPG, TIFF
+                </span>
+                <span className="px-2.5 py-1 bg-emerald-950/60 text-emerald-400 rounded-lg text-[11px] font-medium border border-emerald-800/60">
+                  ⚡ 100% Local GPU Processing
+                </span>
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setShowScanModal(true);
+                  }}
+                  className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-sky-300 hover:text-sky-200 rounded-lg text-[11px] font-medium border border-slate-700 transition flex items-center space-x-1"
+                >
+                  <HardDrive className="w-3.5 h-3.5 text-sky-400" />
+                  <span>Scan Local File Path</span>
+                </button>
+              </div>
             </div>
 
             {/* Records Data Table */}
@@ -331,6 +384,7 @@ export default function App() {
               selectedRecordId={selectedRecord?.id}
               onSelectRecord={handleSelectRecord}
               onDeleteRecord={handleDeleteRecord}
+              onClearAll={handleClearAll}
               statusFilter={statusFilter}
               onStatusFilterChange={setStatusFilter}
               searchTerm={searchTerm}

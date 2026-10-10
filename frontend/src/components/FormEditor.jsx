@@ -136,6 +136,19 @@ export default function FormEditor({ record, onRecordUpdated }) {
     setTimeout(() => setCopiedText(false), 2000);
   };
 
+  const handleDownloadText = () => {
+    if (!currentDisplayedText) return;
+    const blob = new Blob([currentDisplayedText], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    const baseName = (formData.filename || 'extracted_text').replace(/\.[^/.]+$/, '');
+    link.download = `${baseName}_extracted_text.txt`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
   return (
     <div className="flex flex-col h-full bg-slate-900/95 border border-slate-800 rounded-xl overflow-hidden shadow-2xl backdrop-blur-md">
       {/* Header Bar */}
@@ -349,6 +362,16 @@ export default function FormEditor({ record, onRecordUpdated }) {
                       <span>Copy Text</span>
                     </>
                   )}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleDownloadText}
+                  className="flex items-center space-x-1.5 px-3 py-1 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 hover:text-white rounded-lg text-xs font-medium transition shadow-sm"
+                  title="Download extracted text as a .txt file"
+                >
+                  <Download className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>Download .txt</span>
                 </button>
               </div>
             </div>

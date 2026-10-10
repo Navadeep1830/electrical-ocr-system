@@ -9,6 +9,7 @@ export default function RecordTable({
   selectedRecordId, 
   onSelectRecord, 
   onDeleteRecord,
+  onClearAll,
   statusFilter,
   onStatusFilterChange,
   searchTerm,
@@ -68,16 +69,32 @@ export default function RecordTable({
           })}
         </div>
 
-        {/* Live Search */}
-        <div className="relative w-full sm:w-72">
-          <Search className="w-4 h-4 absolute left-3 top-2.5 text-slate-400" />
-          <input
-            type="text"
-            value={searchTerm}
-            onChange={(e) => onSearchChange(e.target.value)}
-            placeholder="Search customer, serial, rating..."
-            className="w-full bg-slate-900/90 border border-slate-700/80 rounded-xl pl-9 pr-3 py-1.5 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-sky-500"
-          />
+        {/* Live Search & Clear All */}
+        <div className="flex items-center space-x-2 w-full sm:w-auto">
+          <div className="relative flex-1 sm:w-64">
+            <Search className="w-4 h-4 absolute left-3 top-2.5 text-slate-400" />
+            <input
+              type="text"
+              value={searchTerm}
+              onChange={(e) => onSearchChange(e.target.value)}
+              placeholder="Search extracted text, serial, customer..."
+              className="w-full bg-slate-900/90 border border-slate-700/80 rounded-xl pl-9 pr-3 py-1.5 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-sky-500"
+            />
+          </div>
+          {records.length > 0 && onClearAll && (
+            <button
+              onClick={() => {
+                if (window.confirm('Are you sure you want to delete all document records and clear the table?')) {
+                  onClearAll();
+                }
+              }}
+              className="flex items-center space-x-1 px-3 py-1.5 bg-rose-950/60 hover:bg-rose-900/80 border border-rose-800 text-rose-300 hover:text-white rounded-xl text-xs font-medium transition shrink-0"
+              title="Clear all records from database"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Clear All</span>
+            </button>
+          )}
         </div>
       </div>
 

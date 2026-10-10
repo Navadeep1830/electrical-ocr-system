@@ -23,7 +23,7 @@ DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite:///{DB_PATH}")
 VLM_MODEL_ID = os.getenv("VLM_MODEL_ID", "Qwen/Qwen2.5-VL-3B-Instruct")
 VLM_DEVICE = os.getenv("VLM_DEVICE", "auto")  # 'auto', 'cuda', 'cpu'
 VLM_TORCH_DTYPE = os.getenv("VLM_TORCH_DTYPE", "float16")  # 'float16', 'bfloat16', 'float32'
-VLM_MAX_NEW_TOKENS = int(os.getenv("VLM_MAX_NEW_TOKENS", "1536"))
+VLM_MAX_NEW_TOKENS = int(os.getenv("VLM_MAX_NEW_TOKENS", "2560"))
 
 # Rendering Configuration
 PDF_RENDER_DPI = int(os.getenv("PDF_RENDER_DPI", "300"))

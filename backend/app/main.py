@@ -87,6 +87,13 @@ def render_pdf_pages(pdf_path: Path, record_prefix: str) -> List[dict]:
             out_path = PAGES_DIR / out_filename
 
             page = pdf[i]
+            embedded_text = ""
+            try:
+                text_page = page.get_textpage()
+                embedded_text = text_page.get_text_range()
+            except Exception:
+                embedded_text = ""
+
             rendered_image = page.render(scale=scale).to_pil()
             rendered_image.save(out_path, format="PNG", optimize=True)
 
@@ -97,6 +104,7 @@ def render_pdf_pages(pdf_path: Path, record_prefix: str) -> List[dict]:
                 "image_url": f"/uploads/pages/{out_filename}",
                 "width": w,
                 "height": h,
+                "embedded_text": embedded_text,
             })
     except Exception as exc:
         logger.warning(f"pypdfium2 failed: {exc}. Attempting pdftoppm fallback...")
@@ -123,6 +131,7 @@ def render_pdf_pages(pdf_path: Path, record_prefix: str) -> List[dict]:
                 "image_url": f"/uploads/pages/{target_name}",
                 "width": w,
                 "height": h,
+                "embedded_text": "",
             })
 
     return rendered_pages
@@ -166,11 +175,13 @@ def process_and_save_document(
             "image_url": f"/uploads/pages/{out_filename}",
             "width": img.width,
             "height": img.height,
+            "embedded_text": "",
         }]
 
     # Run VLM / OCR extraction
     page_img_paths = [p["file_path"] for p in rendered_pages]
-    extraction: FormExtractionData = vlm_engine.extract_document(page_img_paths)
+    embedded_texts = {p["page_number"]: p.get("embedded_text", "") for p in rendered_pages}
+    extraction: FormExtractionData = vlm_engine.extract_document(page_img_paths, embedded_texts=embedded_texts)
 
     # Disaggregate ratings
     disagg = extraction.ratings or ElectricalRatingParser.parse_ratings(
@@ -500,6 +511,21 @@ def update_and_verify_record(
     session.commit()
     session.refresh(record)
     return format_record_response(record)
+
+
+@app.delete("/api/records/clear/all")
+def clear_all_records(session: Session = Depends(get_session)):
+    """Clear all records from database and purge uploaded page cache."""
+    from sqlmodel import delete
+    session.exec(delete(FormPage))
+    session.exec(delete(FormRecord))
+    session.commit()
+    for f in PAGES_DIR.glob("*.*"):
+        try:
+            f.unlink()
+        except Exception:
+            pass
+    return {"message": "All records and cache files successfully cleared"}
 
 
 @app.delete("/api/records/{record_id}")

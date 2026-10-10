@@ -61,6 +61,11 @@ export const deleteRecord = async (id) => {
   return resp.data;
 };
 
+export const clearAllRecords = async () => {
+  const resp = await client.delete('/api/records/clear/all');
+  return resp.data;
+};
+
 export const exportRecord = async (id, format = 'json') => {
   const resp = await client.get(`/api/records/${id}/export`, {
     params: { format },
