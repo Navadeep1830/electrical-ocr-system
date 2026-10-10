@@ -274,7 +274,7 @@ class VLMInferenceEngine:
             self.loading_in_progress = False
 
     def _run_enhanced_ocr(self, image_path: str) -> str:
-        """Run adaptive multi-pass OCR with coordinate-based table and column preservation."""
+        """Run clean multi-pass OCR with natural line grouping (space-joined, no artificial pipe bars)."""
         try:
             img = Image.open(image_path)
             # Run image_to_data for bounding box coordinates
@@ -300,35 +300,23 @@ class VLMInferenceEngine:
                     lines_dict[bucket] = []
                 lines_dict[bucket].append((left, txt))
             
-            tabular_text = ""
+            cleaned_text = ""
             if len(lines_dict) >= 5:
                 sorted_y = sorted(lines_dict.keys())
                 reconstructed_lines = []
                 for y in sorted_y:
                     row_words = sorted(lines_dict[y], key=lambda x: x[0])
-                    row_str = " | ".join([w[1] for w in row_words])
+                    # Join words with space for clean reading order, NEVER artificial '|'
+                    row_str = " ".join([w[1] for w in row_words])
                     reconstructed_lines.append(row_str)
-                tabular_text = "\n".join(reconstructed_lines)
+                cleaned_text = "\n".join(reconstructed_lines)
 
             # Standard PSM 3 text
             std_text = pytesseract.image_to_string(img, config="--oem 1 --psm 3").strip()
             
-            # Grayscale CLAHE enhancement check
-            try:
-                import cv2
-                cv_img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
-                if cv_img is not None:
-                    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-                    enhanced = clahe.apply(cv_img)
-                    clahe_text = pytesseract.image_to_string(enhanced, config="--oem 1 --psm 6").strip()
-                    if len(clahe_text) > len(std_text) * 1.2:
-                        std_text = clahe_text
-            except Exception:
-                pass
-
-            if tabular_text and len(tabular_text) > 100:
-                return f"{tabular_text}\n\n[STANDARD OCR STREAM]\n{std_text}"
-            return std_text if std_text else tabular_text
+            if cleaned_text and len(cleaned_text) > len(std_text) * 0.7:
+                return cleaned_text
+            return std_text if std_text else cleaned_text
         except Exception as err:
             logger.warning(f"OCR failed for {image_path}: {err}")
             try:
@@ -385,7 +373,8 @@ CRITICAL: Return ONLY the valid JSON block without introductory or conversationa
                 "options": {
                     "num_ctx": 4096,
                     "temperature": 0.1,
-                    "num_predict": 2048
+                    "repeat_penalty": 1.2,
+                    "num_predict": 1024
                 }
             }
             
@@ -421,17 +410,18 @@ CRITICAL: Return ONLY the valid JSON block without introductory or conversationa
             page_texts.append(p_text)
             page_dict[page_num] = p_text
 
-        # Step 2: Attempt VLM inference if model is ready or if document contains handwriting/CRF
+        # Step 2: Attempt VLM inference if model is ready or if document contains scanned pages/handwriting
         vlm_data: Optional[Dict[str, Any]] = None
-        combined_initial_ocr = " ".join(page_texts).lower()
-        needs_vision = (
-            "customer request form" in combined_initial_ocr or 
-            "cpri/qaf/01a" in combined_initial_ocr or 
-            os.getenv("VLM_AUTO_LOAD", "false").lower() in ("true", "1")
-        )
+        
+        # Check if vision model should be run
+        import torch
+        has_cuda = torch.cuda.is_available()
+        # All scanned documents without native embedded text benefit from high-accuracy VLM
+        has_embedded = any(len(embedded_texts.get(i + 1, "").strip()) > 50 for i in range(len(page_image_paths))) if embedded_texts else False
+        needs_vision = has_cuda or not has_embedded or os.getenv("VLM_AUTO_LOAD", "false").lower() in ("true", "1")
 
         if not self.is_loaded and needs_vision and not self.loading_in_progress:
-            logger.info("Loading Vision Model (Qwen2.5-VL) on demand for visual & handwriting inspection...")
+            logger.info("Loading Vision Model (Qwen2.5-VL) on GPU for high-accuracy handwriting & table inspection...")
             self.load_model(async_load=False)
 
         if self.is_loaded and self.model is not None and self.processor is not None:
@@ -440,7 +430,7 @@ CRITICAL: Return ONLY the valid JSON block without introductory or conversationa
             except Exception as vlm_err:
                 logger.error(f"VLM inference encountered error: {vlm_err}. Falling back to rule-based engine.")
             finally:
-                # Force GPU VRAM unloading so local Coder LLM has full GPU memory
+                # Force GPU VRAM unloading so other services have full GPU memory
                 self.unload_from_gpu()
 
         # If VLM provided page-by-page transcriptions, integrate them for highest accuracy
@@ -460,35 +450,32 @@ CRITICAL: Return ONLY the valid JSON block without introductory or conversationa
         if vlm_data and vlm_data.get("full_transcription") and len(str(vlm_data["full_transcription"]).strip()) > len(full_raw_text):
             full_raw_text = str(vlm_data["full_transcription"]).strip()
 
-        # Step 3: Query Local Qwen 2.5 Coder to reconstruct tables & make sense of the data
-        coder_data = self._query_local_coder_llm(full_raw_text)
+        # Structured tables from VLM
+        structured_tables_md = vlm_data.get("structured_tables") if vlm_data else None
 
         # Document Classification & Validation
         combined_text = full_raw_text.lower()
-        doc_type_src = (coder_data or {}).get("document_type") or (vlm_data or {}).get("document_type")
-        if doc_type_src in ("CUSTOMER_REQUEST_FORM", "WORK_INSTRUCTION", "LOGSHEET", "DATASHEET"):
-            doc_type = doc_type_src
-            is_valid_crf = (coder_data or {}).get("is_valid_crf", doc_type == "CUSTOMER_REQUEST_FORM")
-            if is_valid_crf:
-                val_msg = "Valid CPRI/QAF/01A Customer Request Form detected. Field identification active."
-            else:
-                val_msg = f"Document identified as {doc_type.replace('_', ' ').title()}. Tabular data extracted below."
-        elif "customer request form" in combined_text or "cpri/qaf/01a" in combined_text:
+        doc_type_src = (vlm_data or {}).get("document_type")
+        if doc_type_src == "PROFORMA_FOR_TRANSFORMERS" or "proforma for transformers" in combined_text:
+            doc_type = "PROFORMA_FOR_TRANSFORMERS"
+            is_valid_crf = False
+            val_msg = "Document identified as Proforma for Transformers. Technical specifications and test requirements extracted."
+        elif doc_type_src == "CUSTOMER_REQUEST_FORM" or "customer request form" in combined_text or "cpri/qaf/01a" in combined_text:
             doc_type = "CUSTOMER_REQUEST_FORM"
             is_valid_crf = True
             val_msg = "Valid CPRI/QAF/01A Customer Request Form detected. Field identification active."
-        elif "work instruction" in combined_text or "cpri/qaf/02" in combined_text:
+        elif doc_type_src == "WORK_INSTRUCTION" or "work instruction" in combined_text or "cpri/qaf/02" in combined_text:
             doc_type = "WORK_INSTRUCTION"
             is_valid_crf = False
-            val_msg = "Document identified as 'Work Instruction' (CPRI/QAF/02)."
-        elif any(k in combined_text for k in ["log sheet", "log-sheet", "loss measurement", "routine test", "short circuit", "oil leakage", "temp. rise"]):
+            val_msg = "Document identified as Work Instruction (CPRI/QAF/02)."
+        elif doc_type_src == "DATASHEET" or "datasheet" in combined_text or "losses calculation" in combined_text:
+            doc_type = "DATASHEET"
+            is_valid_crf = False
+            val_msg = "Document identified as Laboratory Datasheet. Tabular calculation data extracted."
+        elif doc_type_src == "LOGSHEET" or any(k in combined_text for k in ["log sheet", "log-sheet", "loss measurement", "routine test", "short circuit", "oil leakage", "temp. rise"]):
             doc_type = "LOGSHEET"
             is_valid_crf = False
             val_msg = "Document identified as Laboratory Test Logsheet. Tabular measurement data extracted."
-        elif "proforma for transformers" in combined_text:
-            doc_type = "TRANSFORMER_PROFORMA"
-            is_valid_crf = False
-            val_msg = "Document identified as Transformer Proforma."
         else:
             doc_type = "GENERAL_DOCUMENT"
             is_valid_crf = False
@@ -499,28 +486,21 @@ CRITICAL: Return ONLY the valid JSON block without introductory or conversationa
 
         # Step 5: Merge results intelligently
         final_payload = self._merge_extractions(vlm_data, rule_data)
+        if structured_tables_md:
+            final_payload["structured_tables"] = structured_tables_md
 
-        # If Coder LLM provided structured tables and refined metadata, integrate them
-        structured_tables_md = None
-        if coder_data:
-            if coder_data.get("structured_tables"):
-                structured_tables_md = str(coder_data["structured_tables"]).strip()
-                final_payload["structured_tables"] = structured_tables_md
-            
-            # Incorporate coder fields if VLM had empty or placeholder
-            for field in ["customer_name", "rating_raw", "serial_number", "sample_name", "tests_requested"]:
-                c_val = coder_data.get(field)
-                if c_val and str(c_val).strip() and not str(c_val).strip().startswith("..."):
-                    if not final_payload.get(field) or len(str(final_payload.get(field)).strip()) < 3:
-                        final_payload[field] = str(c_val).strip()
-            
-            # If coder generated a full transcription with structured tables, enhance full_raw_text
-            if coder_data.get("full_transcription") and len(str(coder_data["full_transcription"]).strip()) > 100:
-                coder_tx = str(coder_data["full_transcription"]).strip()
-                if structured_tables_md and structured_tables_md in coder_tx:
-                    full_raw_text = coder_tx
-                elif structured_tables_md:
-                    full_raw_text = f"{structured_tables_md}\n\n{'=' * 45}\n\n{full_raw_text}"
+        # Only query Coder LLM if structured tables are missing and tabular keywords exist in text
+        if not structured_tables_md and ("|" in full_raw_text or any(k in combined_text for k in ["sl.no", "voltage", "current", "loss", "temperature"])):
+            coder_data = self._query_local_coder_llm(full_raw_text)
+            if coder_data:
+                if coder_data.get("structured_tables"):
+                    structured_tables_md = str(coder_data["structured_tables"]).strip()
+                    final_payload["structured_tables"] = structured_tables_md
+                for field in ["customer_name", "rating_raw", "serial_number", "sample_name", "tests_requested"]:
+                    c_val = coder_data.get(field)
+                    if c_val and str(c_val).strip() and not str(c_val).strip().startswith("..."):
+                        if not final_payload.get(field) or len(str(final_payload.get(field)).strip()) < 3:
+                            final_payload[field] = str(c_val).strip()
 
         # Step 6: Ensure electrical ratings are rigorously disaggregated
         raw_rating_text = (
@@ -530,7 +510,7 @@ CRITICAL: Return ONLY the valid JSON block without introductory or conversationa
         )
         final_payload["ratings"] = ElectricalRatingParser.parse_ratings(raw_rating_text)
 
-        # Prepend clean identified summary to Sheet 1 text if valid CRF
+        # Prepend clean identified summary to Sheet 1 text
         if is_valid_crf and final_payload.get("customer_name"):
             header_summary = (
                 f"[IDENTIFIED CPRI CRF FIELDS]\n"
@@ -538,6 +518,19 @@ CRITICAL: Return ONLY the valid JSON block without introductory or conversationa
                 f"Rating: {final_payload.get('rating_raw')}\n"
                 f"Sample: {final_payload.get('sample_name') or final_payload.get('sample_description')}\n"
                 f"Serial Number: {final_payload.get('serial_number')}\n"
+                f"Tests Requested: {final_payload.get('tests_requested')}\n"
+                f"{'=' * 45}\n\n"
+            )
+            if header_summary not in full_raw_text:
+                full_raw_text = header_summary + full_raw_text
+            if 1 in page_dict and header_summary not in page_dict[1]:
+                page_dict[1] = header_summary + page_dict[1]
+        elif doc_type == "PROFORMA_FOR_TRANSFORMERS" and final_payload.get("serial_number"):
+            header_summary = (
+                f"[IDENTIFIED TRANSFORMER PROFORMA FIELDS]\n"
+                f"Serial Number: {final_payload.get('serial_number')}\n"
+                f"Rating: {final_payload.get('rating_raw')}\n"
+                f"Sample: {final_payload.get('sample_name') or 'Distribution Transformer'}\n"
                 f"Tests Requested: {final_payload.get('tests_requested')}\n"
                 f"{'=' * 45}\n\n"
             )
@@ -557,42 +550,50 @@ CRITICAL: Return ONLY the valid JSON block without introductory or conversationa
         # Build schema
         return FormExtractionData(**final_payload)
 
-    def _infer_vlm(self, page_image_paths: List[str]) -> Optional[Dict[str, Any]]:
-        """Run multi-image prompt through Qwen2.5-VL."""
+    def _infer_vlm_page(self, image_path: str, page_num: int, total_pages: int) -> Optional[Dict[str, Any]]:
+        """Run single-page visual inference with Qwen2.5-VL in 4-bit NF4 quantization."""
         import torch
 
-        with self.inference_lock:
-            images = []
-            for p in page_image_paths:
-                img = Image.open(p).convert("RGB")
-                img.thumbnail((1280, 1280), Image.Resampling.LANCZOS)
-                images.append(img)
+        try:
+            img = Image.open(image_path).convert("RGB")
+            # Downscale high-resolution scans to max dimension 1024 for VRAM stability & handwriting retention
+            img.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
 
-            logger.info(f"Running VLM generation on {len(images)} pages (resolution: {[img.size for img in images]})...")
-
-            # Construct message with images
-            content = []
-            for img in images:
-                content.append({"type": "image", "image": img})
-            content.append({
-                "type": "text",
-                "text": "Analyze all pages of this document. Transcribe the text verbatim and extract all actual handwritten and printed values into the JSON fields. Do not output placeholder dots ('...')."
-            })
+            prompt = (
+                f"You are an expert document OCR and technical specification analysis AI.\n"
+                f"Analyze this electrical test / engineering document page (Page {page_num} of {total_pages}) with extreme accuracy.\n"
+                f"Carefully extract all printed text, handwritten entries (names, ratings, numbers), checkboxes ([√] or [ ]), and tables.\n"
+                f"CRITICAL: Do NOT invent placeholder dots ('...') or random bars ('|'). Output the exact text and numbers.\n\n"
+                f"Return a valid JSON object with the following fields:\n"
+                f"{{\n"
+                f'  "document_type": "CUSTOMER_REQUEST_FORM", "PROFORMA_FOR_TRANSFORMERS", "LOGSHEET", "DATASHEET", "WORK_INSTRUCTION", or "GENERAL_DOCUMENT",\n'
+                f'  "format_no": "Document format or issue number if visible, e.g. CPRI/QAF/01A or CPRI/QAF/12",\n'
+                f'  "customer_name": "Customer or manufacturer company name if visible on this page, else empty string",\n'
+                f'  "customer_address": "Customer address if visible, else empty string",\n'
+                f'  "sample_name": "Equipment or sample description (e.g. Distribution Transformer)",\n'
+                f'  "sample_description": "Additional sample description if visible",\n'
+                f'  "serial_number": "Serial number or sample code (e.g. 1098 or APT/250-11/001)",\n'
+                f'  "rating_raw": "Complete electrical rating string (e.g. 250 kVA, 11000/433V, 3Ph, 50Hz, Dyn11, ONAN)",\n'
+                f'  "tests_requested": "Tests requested or test table summary",\n'
+                f'  "tables_markdown": "Clean Markdown tables for any test tables, winding details, or parameter tables on this page, or empty string if none",\n'
+                f'  "transcription": "Complete verbatim markdown transcription of all text, handwriting, checkboxes, and tables on this page in natural reading order without random bars"\n'
+                f"}}\n"
+                f"Return ONLY valid JSON."
+            )
 
             messages = [
-                {"role": "system", "content": VLM_SYSTEM_PROMPT},
-                {"role": "user", "content": content}
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image", "image": img},
+                        {"type": "text", "text": prompt}
+                    ]
+                }
             ]
 
-            # Process input
-            try:
-                from qwen_vl_utils import process_vision_info
-                image_inputs, video_inputs = process_vision_info(messages)
-            except ImportError:
-                image_inputs = images
-                video_inputs = None
-
             prompt_text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+            from qwen_vl_utils import process_vision_info
+            image_inputs, video_inputs = process_vision_info(messages)
             inputs = self.processor(
                 text=[prompt_text],
                 images=image_inputs,
@@ -601,19 +602,17 @@ CRITICAL: Return ONLY the valid JSON block without introductory or conversationa
                 return_tensors="pt"
             )
 
-            # Move inputs to model device
             target_device = self.model.device if hasattr(self.model, "device") else "cuda" if torch.cuda.is_available() else "cpu"
             inputs = inputs.to(target_device)
 
             with torch.no_grad():
                 generated_ids = self.model.generate(
                     **inputs,
-                    max_new_tokens=self.max_new_tokens,
+                    max_new_tokens=1800,
                     temperature=0.1,
                     do_sample=False,
                 )
 
-            # Slice output tokens
             generated_ids_trimmed = [
                 out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs["input_ids"], generated_ids)
             ]
@@ -623,8 +622,64 @@ CRITICAL: Return ONLY the valid JSON block without introductory or conversationa
                 clean_up_tokenization_spaces=False
             )[0]
 
-            logger.info(f"VLM raw output generated (length {len(output_text)} chars): {output_text[:300]}...")
+            logger.info(f"Page {page_num} VLM inference completed ({len(output_text)} chars generated)")
             return self._parse_json_from_text(output_text)
+        except Exception as err:
+            logger.error(f"Error in VLM page {page_num} inference: {err}")
+            return None
+
+    def _infer_vlm(self, page_image_paths: List[str]) -> Optional[Dict[str, Any]]:
+        """Run page-by-page visual inference with Qwen2.5-VL and merge results."""
+        with self.inference_lock:
+            total_pages = len(page_image_paths)
+            page_results = []
+            page_transcriptions = {}
+            all_tables = []
+            
+            for idx, img_path in enumerate(page_image_paths):
+                page_num = idx + 1
+                logger.info(f"Processing Page {page_num}/{total_pages} with VLM...")
+                res = self._infer_vlm_page(img_path, page_num, total_pages)
+                if res:
+                    page_results.append(res)
+                    tx = res.get("transcription") or ""
+                    if tx:
+                        page_transcriptions[page_num] = tx
+                    tbl = res.get("tables_markdown") or ""
+                    if tbl and tbl.strip() and "|" in tbl:
+                        all_tables.append(tbl.strip())
+                else:
+                    logger.warning(f"VLM returned no result for Page {page_num}")
+
+            if not page_results:
+                return None
+
+            # Merge aggregated fields
+            merged: Dict[str, Any] = {
+                "page_transcriptions": page_transcriptions,
+                "structured_tables": "\n\n".join(all_tables) if all_tables else None,
+            }
+
+            # Extract best metadata across pages
+            for res in page_results:
+                for k in ["document_type", "format_no", "customer_name", "customer_address", 
+                          "sample_name", "sample_description", "serial_number", "rating_raw", "tests_requested"]:
+                    val = res.get(k)
+                    if isinstance(val, list):
+                        val = ", ".join([str(v) for v in val])
+                    if val and str(val).strip() and str(val).strip().lower() not in ("none", "n/a", "...", "-", ""):
+                        if k not in merged or len(str(val)) > len(str(merged.get(k, ""))):
+                            merged[k] = val
+
+            # Build full transcription from page transcriptions
+            if page_transcriptions:
+                full_tx_parts = [
+                    f"--- SHEET {p} ---\n{page_transcriptions[p]}"
+                    for p in sorted(page_transcriptions.keys())
+                ]
+                merged["full_transcription"] = "\n\n=== SHEET BREAK ===\n\n".join(full_tx_parts)
+
+            return merged
 
     def _parse_json_from_text(self, text: str) -> Optional[Dict[str, Any]]:
         """Extract and parse JSON object from markdown block or raw text with repair support."""
