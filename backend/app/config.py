@@ -25,6 +25,10 @@ VLM_DEVICE = os.getenv("VLM_DEVICE", "auto")  # 'auto', 'cuda', 'cpu'
 VLM_TORCH_DTYPE = os.getenv("VLM_TORCH_DTYPE", "float16")  # 'float16', 'bfloat16', 'float32'
 VLM_MAX_NEW_TOKENS = int(os.getenv("VLM_MAX_NEW_TOKENS", "2560"))
 
+# Local Coder LLM Configuration (Ollama)
+OLLAMA_API_URL = os.getenv("OLLAMA_API_URL", "http://127.0.0.1:11434")
+CODER_MODEL_ID = os.getenv("CODER_MODEL_ID", "qwen2.5-coder:3b")
+
 # Rendering Configuration
 PDF_RENDER_DPI = int(os.getenv("PDF_RENDER_DPI", "300"))
 

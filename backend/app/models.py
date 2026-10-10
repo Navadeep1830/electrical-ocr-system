@@ -90,6 +90,7 @@ class FormRecord(SQLModel, table=True):
     document_type: str = Field(default="CUSTOMER_REQUEST_FORM", index=True)
     is_valid_crf: bool = Field(default=True)
     validation_message: Optional[str] = None
+    structured_tables: Optional[str] = None
     raw_extracted_text: Optional[str] = None
 
     # Extraction Payloads (JSON strings)

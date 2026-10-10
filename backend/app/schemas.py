@@ -62,6 +62,7 @@ class FormExtractionData(BaseModel):
     document_type: str = "CUSTOMER_REQUEST_FORM"
     is_valid_crf: bool = True
     validation_message: Optional[str] = None
+    structured_tables: Optional[str] = None
     raw_extracted_text: Optional[str] = None
     page_texts: Dict[int, str] = Field(default_factory=dict)
 
@@ -176,6 +177,7 @@ class FormRecordResponse(BaseModel):
     document_type: Optional[str] = "CUSTOMER_REQUEST_FORM"
     is_valid_crf: Optional[bool] = True
     validation_message: Optional[str] = None
+    structured_tables: Optional[str] = None
     raw_extracted_text: Optional[str] = None
     verified_by: Optional[str]
     verification_timestamp: Optional[str]

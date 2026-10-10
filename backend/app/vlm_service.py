@@ -8,12 +8,48 @@ from pathlib import Path
 from PIL import Image
 
 import pytesseract
-from app.config import VLM_MODEL_ID, VLM_DEVICE, VLM_TORCH_DTYPE, VLM_MAX_NEW_TOKENS
+import requests
+from app.config import (
+    VLM_MODEL_ID, VLM_DEVICE, VLM_TORCH_DTYPE, VLM_MAX_NEW_TOKENS,
+    OLLAMA_API_URL, CODER_MODEL_ID
+)
 from app.parser import ElectricalRatingParser, FormLayoutRuleParser
 from app.schemas import FormExtractionData, ElectricalRatingDisaggregated
 
 logger = logging.getLogger("vlm_service")
 logging.basicConfig(level=logging.INFO)
+
+
+def auto_orient_image(image: Image.Image) -> Image.Image:
+    """Detects if an image is rotated (90, 180, 270) and returns the upright PIL Image."""
+    try:
+        w, h = image.size
+        scale = min(1.0, 900 / max(w, h))
+        thumb = image.resize((int(w * scale), int(h * scale)), Image.Resampling.BILINEAR) if scale < 1.0 else image
+
+        scores = {}
+        for ang in [0, 90, 180, 270]:
+            t_img = thumb.rotate(ang, expand=True) if ang != 0 else thumb
+            txt = pytesseract.image_to_string(t_img, config="--oem 1 --psm 3")
+            words = re.findall(r"[a-zA-Z]{3,}", txt)
+            scores[ang] = len(words)
+
+        score_0 = scores[0]
+        best_ang = 0
+        best_score = score_0
+        for ang in [90, 180, 270]:
+            if scores[ang] > best_score:
+                best_score = scores[ang]
+                best_ang = ang
+
+        # Require alternate angle to have at least 1.4x more valid words than 0° to rotate
+        if best_ang != 0 and best_score >= max(20, score_0 * 1.4):
+            logger.info(f"Auto-orientation corrected page by {best_ang}° (score={best_score} vs {score_0})")
+            return image.rotate(best_ang, expand=True)
+    except Exception as e:
+        logger.debug(f"Orientation detection error: {e}")
+    return image
+
 
 
 VLM_SYSTEM_PROMPT = """You are an expert document OCR and forensic document analysis AI.
@@ -93,6 +129,8 @@ class VLMInferenceEngine:
         self.device_setting = VLM_DEVICE
         self.torch_dtype = VLM_TORCH_DTYPE
         self.max_new_tokens = VLM_MAX_NEW_TOKENS
+        self.ollama_url = OLLAMA_API_URL
+        self.coder_model_id = CODER_MODEL_ID
 
         self.model = None
         self.processor = None
@@ -102,6 +140,26 @@ class VLMInferenceEngine:
         self.inference_lock = threading.Lock()
 
         self._initialized = True
+
+    def unload_from_gpu(self) -> None:
+        """Unload Qwen2.5-VL weights and free CUDA VRAM completely for local LLM inference."""
+        with self.inference_lock:
+            if self.model is not None or self.processor is not None:
+                logger.info("Unloading Vision Model (Qwen2.5-VL) from GPU to free VRAM for LLM...")
+                try:
+                    import torch, gc
+                    del self.model
+                    del self.processor
+                    self.model = None
+                    self.processor = None
+                    self.is_loaded = False
+                    gc.collect()
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                        torch.cuda.ipc_collect()
+                    logger.info("GPU VRAM successfully freed!")
+                except Exception as e:
+                    logger.warning(f"Error unloading VLM: {e}")
 
     def get_status(self) -> Dict[str, Any]:
         """Return runtime status of the VLM engine and GPU memory usage."""
@@ -147,7 +205,17 @@ class VLMInferenceEngine:
 
         logger.info(f"Starting VLM load: {self.model_id}")
         try:
-            import torch
+            # Evict Ollama models from GPU to give VLM maximum VRAM
+            try:
+                requests.post(f"{self.ollama_url}/api/generate", json={"model": self.coder_model_id, "keep_alive": 0}, timeout=5)
+            except Exception:
+                pass
+
+            import torch, gc
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
             from transformers import AutoProcessor
 
             # Try importing Qwen2_5_VL or general AutoModel
@@ -206,28 +274,131 @@ class VLMInferenceEngine:
             self.loading_in_progress = False
 
     def _run_enhanced_ocr(self, image_path: str) -> str:
-        """Run adaptive multi-pass OCR using PIL/OpenCV for maximum accuracy."""
+        """Run adaptive multi-pass OCR with coordinate-based table and column preservation."""
         try:
-            import cv2
             img = Image.open(image_path)
-            # Pass 1: Standard PSM 3 (auto page segmentation)
-            text_p3 = pytesseract.image_to_string(img, config="--oem 1 --psm 3").strip()
+            # Run image_to_data for bounding box coordinates
+            data = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT, config="--oem 1 --psm 3")
             
-            # Pass 2: Grayscale with CLAHE contrast enhancement for low-contrast/faded scans
+            # Cluster words into horizontal rows based on Y-coordinates
+            lines_dict = {}
+            for i in range(len(data.get("text", []))):
+                txt = data["text"][i].strip()
+                conf = int(data["conf"][i]) if str(data["conf"][i]).isdigit() or isinstance(data["conf"][i], (int, float)) else 0
+                if not txt or conf < 15:
+                    continue
+                top = data["top"][i]
+                left = data["left"][i]
+                
+                bucket = None
+                for y in lines_dict:
+                    if abs(y - top) <= 18:
+                        bucket = y
+                        break
+                if bucket is None:
+                    bucket = top
+                    lines_dict[bucket] = []
+                lines_dict[bucket].append((left, txt))
+            
+            tabular_text = ""
+            if len(lines_dict) >= 5:
+                sorted_y = sorted(lines_dict.keys())
+                reconstructed_lines = []
+                for y in sorted_y:
+                    row_words = sorted(lines_dict[y], key=lambda x: x[0])
+                    row_str = " | ".join([w[1] for w in row_words])
+                    reconstructed_lines.append(row_str)
+                tabular_text = "\n".join(reconstructed_lines)
+
+            # Standard PSM 3 text
+            std_text = pytesseract.image_to_string(img, config="--oem 1 --psm 3").strip()
+            
+            # Grayscale CLAHE enhancement check
             try:
+                import cv2
                 cv_img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
                 if cv_img is not None:
                     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
                     enhanced = clahe.apply(cv_img)
-                    text_p6 = pytesseract.image_to_string(enhanced, config="--oem 1 --psm 6").strip()
-                    if len(text_p6) > len(text_p3) * 1.15:
-                        return text_p6
+                    clahe_text = pytesseract.image_to_string(enhanced, config="--oem 1 --psm 6").strip()
+                    if len(clahe_text) > len(std_text) * 1.2:
+                        std_text = clahe_text
             except Exception:
                 pass
-            return text_p3 if text_p3 else pytesseract.image_to_string(img, config="--oem 1 --psm 6").strip()
+
+            if tabular_text and len(tabular_text) > 100:
+                return f"{tabular_text}\n\n[STANDARD OCR STREAM]\n{std_text}"
+            return std_text if std_text else tabular_text
         except Exception as err:
             logger.warning(f"OCR failed for {image_path}: {err}")
-            return ""
+            try:
+                return pytesseract.image_to_string(Image.open(image_path), config="--oem 1 --psm 3").strip()
+            except Exception:
+                return ""
+
+    def _query_local_coder_llm(self, document_text: str, doc_hint: str = "") -> Optional[Dict[str, Any]]:
+        """Query local Qwen 2.5 Coder via Ollama on GPU to reconstruct tables and extract structured fields."""
+        try:
+            logger.info(f"Querying local Coder LLM ({self.coder_model_id}) on GPU for table reconstruction & field synthesis...")
+            prompt = f"""You are an expert electrical test documentation engineer.
+Analyze the following text and table data extracted via high-resolution OCR from an electrical test document:
+
+\"\"\"
+{document_text[:12000]}
+\"\"\"
+
+Your tasks:
+1. Identify the Document Type and Format Number (e.g. CPRI Customer Request Form CPRI/QAF/01A, Transformer Loss Measurement Datasheet, Pressure Test Logsheet, Routine Test Logsheet, etc.).
+2. Extract all metadata into structured fields:
+   - "customer_name": Customer / manufacturer company name
+   - "customer_address": Customer address
+   - "rating_raw": Complete electrical rating string (e.g. 250 KVA/11kV/433V, 3PH, 50Hz Copperwound)
+   - "sample_name": Equipment or sample description
+   - "serial_number": Serial number or sample ID (e.g. 1098 or HVD25S0847)
+   - "tests_requested": Tests requested or test category
+   - "format_no": Document format number
+3. Reconstruct ALL measurement, calibration, and test data tables into clean, aligned Markdown tables with headers, units, and all numeric values preserved.
+4. Output a clean, complete full transcription with the structured tables included.
+
+Return a valid JSON object with EXACTLY this structure:
+{{
+  "document_type": "CUSTOMER_REQUEST_FORM", "LOGSHEET", "DATASHEET", "WORK_INSTRUCTION", or "GENERAL_DOCUMENT",
+  "is_valid_crf": true or false,
+  "format_no": "...",
+  "customer_name": "...",
+  "customer_address": "...",
+  "sample_name": "...",
+  "rating_raw": "...",
+  "serial_number": "...",
+  "tests_requested": "...",
+  "structured_tables": "### Measurement Tables\\n\\n| Column 1 | Column 2 | ... |\\n|---|---|---|\\n| ... | ... | ... |",
+  "full_transcription": "Complete text with structured tables included."
+}}
+
+CRITICAL: Return ONLY the valid JSON block without introductory or conversational prose."""
+
+            payload = {
+                "model": self.coder_model_id,
+                "prompt": prompt,
+                "stream": False,
+                "format": "json",
+                "options": {
+                    "num_ctx": 4096,
+                    "temperature": 0.1,
+                    "num_predict": 2048
+                }
+            }
+            
+            resp = requests.post(f"{self.ollama_url}/api/generate", json=payload, timeout=90)
+            if resp.status_code == 200:
+                raw_resp = resp.json().get("response", "").strip()
+                data = self._parse_json_from_text(raw_resp)
+                if data:
+                    logger.info("Successfully received structured tables and fields from Qwen 2.5 Coder!")
+                    return data
+        except Exception as err:
+            logger.warning(f"Local Coder LLM query skipped or error: {err}")
+        return None
 
     def extract_document(
         self, 
@@ -250,13 +421,27 @@ class VLMInferenceEngine:
             page_texts.append(p_text)
             page_dict[page_num] = p_text
 
-        # Step 2: Attempt VLM inference if model is ready
+        # Step 2: Attempt VLM inference if model is ready or if document contains handwriting/CRF
         vlm_data: Optional[Dict[str, Any]] = None
+        combined_initial_ocr = " ".join(page_texts).lower()
+        needs_vision = (
+            "customer request form" in combined_initial_ocr or 
+            "cpri/qaf/01a" in combined_initial_ocr or 
+            os.getenv("VLM_AUTO_LOAD", "false").lower() in ("true", "1")
+        )
+
+        if not self.is_loaded and needs_vision and not self.loading_in_progress:
+            logger.info("Loading Vision Model (Qwen2.5-VL) on demand for visual & handwriting inspection...")
+            self.load_model(async_load=False)
+
         if self.is_loaded and self.model is not None and self.processor is not None:
             try:
                 vlm_data = self._infer_vlm(page_image_paths)
             except Exception as vlm_err:
                 logger.error(f"VLM inference encountered error: {vlm_err}. Falling back to rule-based engine.")
+            finally:
+                # Force GPU VRAM unloading so local Coder LLM has full GPU memory
+                self.unload_from_gpu()
 
         # If VLM provided page-by-page transcriptions, integrate them for highest accuracy
         if vlm_data and vlm_data.get("page_transcriptions"):
@@ -275,15 +460,19 @@ class VLMInferenceEngine:
         if vlm_data and vlm_data.get("full_transcription") and len(str(vlm_data["full_transcription"]).strip()) > len(full_raw_text):
             full_raw_text = str(vlm_data["full_transcription"]).strip()
 
+        # Step 3: Query Local Qwen 2.5 Coder to reconstruct tables & make sense of the data
+        coder_data = self._query_local_coder_llm(full_raw_text)
+
         # Document Classification & Validation
         combined_text = full_raw_text.lower()
-        if vlm_data and "document_type" in vlm_data and vlm_data["document_type"] in ("CUSTOMER_REQUEST_FORM", "WORK_INSTRUCTION", "LOGSHEET", "DATASHEET"):
-            doc_type = vlm_data["document_type"]
-            is_valid_crf = vlm_data.get("is_valid_crf", doc_type == "CUSTOMER_REQUEST_FORM")
+        doc_type_src = (coder_data or {}).get("document_type") or (vlm_data or {}).get("document_type")
+        if doc_type_src in ("CUSTOMER_REQUEST_FORM", "WORK_INSTRUCTION", "LOGSHEET", "DATASHEET"):
+            doc_type = doc_type_src
+            is_valid_crf = (coder_data or {}).get("is_valid_crf", doc_type == "CUSTOMER_REQUEST_FORM")
             if is_valid_crf:
                 val_msg = "Valid CPRI/QAF/01A Customer Request Form detected. Field identification active."
             else:
-                val_msg = f"Document identified as {doc_type.replace('_', ' ').title()}. It does not contain standard Customer Request Form fields."
+                val_msg = f"Document identified as {doc_type.replace('_', ' ').title()}. Tabular data extracted below."
         elif "customer request form" in combined_text or "cpri/qaf/01a" in combined_text:
             doc_type = "CUSTOMER_REQUEST_FORM"
             is_valid_crf = True
@@ -291,27 +480,49 @@ class VLMInferenceEngine:
         elif "work instruction" in combined_text or "cpri/qaf/02" in combined_text:
             doc_type = "WORK_INSTRUCTION"
             is_valid_crf = False
-            val_msg = "Document identified as 'Work Instruction' (CPRI/QAF/02). It does not contain standard Customer Request Form fields."
+            val_msg = "Document identified as 'Work Instruction' (CPRI/QAF/02)."
         elif any(k in combined_text for k in ["log sheet", "log-sheet", "loss measurement", "routine test", "short circuit", "oil leakage", "temp. rise"]):
             doc_type = "LOGSHEET"
             is_valid_crf = False
-            val_msg = "Document identified as Laboratory Test Logsheet. It does not contain standard Customer Request Form fields."
+            val_msg = "Document identified as Laboratory Test Logsheet. Tabular measurement data extracted."
         elif "proforma for transformers" in combined_text:
             doc_type = "TRANSFORMER_PROFORMA"
             is_valid_crf = False
-            val_msg = "Document identified as Transformer Proforma. It does not contain standard Customer Request Form fields."
+            val_msg = "Document identified as Transformer Proforma."
         else:
             doc_type = "GENERAL_DOCUMENT"
             is_valid_crf = False
-            val_msg = "This document does not match standard CPRI Customer Request Form (CPRI/QAF/01A) fields. Raw text extracted below."
+            val_msg = "Raw text and tables extracted below."
 
-        # Step 3: Rule-based extraction from OCR
+        # Step 4: Rule-based extraction from OCR
         rule_data = FormLayoutRuleParser.extract_from_ocr_pages(page_texts)
 
-        # Step 4: Merge results intelligently
+        # Step 5: Merge results intelligently
         final_payload = self._merge_extractions(vlm_data, rule_data)
 
-        # Step 5: Ensure electrical ratings are rigorously disaggregated
+        # If Coder LLM provided structured tables and refined metadata, integrate them
+        structured_tables_md = None
+        if coder_data:
+            if coder_data.get("structured_tables"):
+                structured_tables_md = str(coder_data["structured_tables"]).strip()
+                final_payload["structured_tables"] = structured_tables_md
+            
+            # Incorporate coder fields if VLM had empty or placeholder
+            for field in ["customer_name", "rating_raw", "serial_number", "sample_name", "tests_requested"]:
+                c_val = coder_data.get(field)
+                if c_val and str(c_val).strip() and not str(c_val).strip().startswith("..."):
+                    if not final_payload.get(field) or len(str(final_payload.get(field)).strip()) < 3:
+                        final_payload[field] = str(c_val).strip()
+            
+            # If coder generated a full transcription with structured tables, enhance full_raw_text
+            if coder_data.get("full_transcription") and len(str(coder_data["full_transcription"]).strip()) > 100:
+                coder_tx = str(coder_data["full_transcription"]).strip()
+                if structured_tables_md and structured_tables_md in coder_tx:
+                    full_raw_text = coder_tx
+                elif structured_tables_md:
+                    full_raw_text = f"{structured_tables_md}\n\n{'=' * 45}\n\n{full_raw_text}"
+
+        # Step 6: Ensure electrical ratings are rigorously disaggregated
         raw_rating_text = (
             f"{final_payload.get('rating_raw', '')} "
             f"{final_payload.get('sample_description', '')} "
@@ -335,10 +546,11 @@ class VLMInferenceEngine:
             if 1 in page_dict and header_summary not in page_dict[1]:
                 page_dict[1] = header_summary + page_dict[1]
 
-        # Attach raw text and document validation
+        # Attach raw text, tables, and document validation
         final_payload["document_type"] = doc_type
         final_payload["is_valid_crf"] = is_valid_crf
         final_payload["validation_message"] = val_msg
+        final_payload["structured_tables"] = structured_tables_md
         final_payload["raw_extracted_text"] = full_raw_text
         final_payload["page_texts"] = page_dict
 

@@ -31,13 +31,91 @@ function ConfidenceBadge({ score }) {
   );
 }
 
+function MarkdownTableRenderer({ markdown }) {
+  if (!markdown) return null;
+  const lines = markdown.split('\n');
+  const elements = [];
+  let inTable = false;
+  let tableHeader = [];
+  let tableRows = [];
+
+  const flushTable = (key) => {
+    if (tableHeader.length > 0) {
+      elements.push(
+        <div key={`tbl-${key}`} className="overflow-x-auto my-3 border border-slate-700/80 rounded-xl bg-slate-950/70 shadow-md">
+          <table className="w-full text-left text-xs text-slate-200 border-collapse">
+            <thead>
+              <tr className="bg-slate-800/90 text-sky-300 font-semibold border-b border-slate-700">
+                {tableHeader.map((h, i) => (
+                  <th key={i} className="px-3 py-2 border-r border-slate-700/60 last:border-r-0 whitespace-nowrap">
+                    {h.trim()}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-800">
+              {tableRows.map((r, ri) => (
+                <tr key={ri} className="hover:bg-slate-800/40 font-mono text-[11px] transition">
+                  {r.map((c, ci) => (
+                    <td key={ci} className="px-3 py-1.5 border-r border-slate-800/60 last:border-r-0 text-slate-300 whitespace-nowrap">
+                      {c.trim()}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      );
+      tableHeader = [];
+      tableRows = [];
+    }
+  };
+
+  lines.forEach((line, idx) => {
+    const trimmed = line.trim();
+    if (trimmed.startsWith('|') && trimmed.endsWith('|')) {
+      const cells = trimmed.slice(1, -1).split('|');
+      if (cells.every((c) => c.trim().match(/^:?-+:?$/))) {
+        // separator line
+      } else if (!inTable) {
+        inTable = true;
+        tableHeader = cells;
+      } else {
+        tableRows.push(cells);
+      }
+    } else {
+      if (inTable) {
+        flushTable(idx);
+        inTable = false;
+      }
+      if (trimmed.startsWith('### ')) {
+        elements.push(<h4 key={idx} className="text-sm font-bold text-sky-400 mt-4 mb-2 flex items-center gap-1.5">{trimmed.slice(4)}</h4>);
+      } else if (trimmed.startsWith('## ')) {
+        elements.push(<h3 key={idx} className="text-base font-bold text-sky-300 mt-5 mb-2">{trimmed.slice(3)}</h3>);
+      } else if (trimmed.startsWith('- ')) {
+        elements.push(<li key={idx} className="text-xs text-slate-300 ml-4 list-disc">{trimmed.slice(2)}</li>);
+      } else if (trimmed) {
+        elements.push(<p key={idx} className="text-xs text-slate-300 my-1">{trimmed}</p>);
+      }
+    }
+  });
+
+  if (inTable) {
+    flushTable('last');
+  }
+
+  return <div className="space-y-1">{elements}</div>;
+}
+
 export default function FormEditor({ record, onRecordUpdated }) {
   const [formData, setFormData] = useState({});
   const [saving, setSaving] = useState(false);
   const [successMessage, setSuccessMessage] = useState('');
   const [errorMessage, setErrorMessage] = useState('');
-  const [activeTab, setActiveTab] = useState('raw_text'); // 'raw_text', 'ratings', 'customer', 'tests', 'lab'
+  const [activeTab, setActiveTab] = useState('raw_text');
   const [copiedText, setCopiedText] = useState(false);
+  const [copiedTable, setCopiedTable] = useState(false);
   const [selectedPageForText, setSelectedPageForText] = useState('all');
 
   useEffect(() => {
@@ -49,8 +127,9 @@ export default function FormEditor({ record, onRecordUpdated }) {
       });
       setSuccessMessage('');
       setErrorMessage('');
-      // If it's not a valid CRF, focus immediately on the raw text tab
-      if (record.is_valid_crf === false) {
+      if (record.structured_tables) {
+        setActiveTab('tables');
+      } else if (record.is_valid_crf === false) {
         setActiveTab('raw_text');
       }
     }
@@ -149,6 +228,26 @@ export default function FormEditor({ record, onRecordUpdated }) {
     document.body.removeChild(link);
   };
 
+  const handleCopyTable = () => {
+    if (!formData.structured_tables) return;
+    navigator.clipboard.writeText(formData.structured_tables);
+    setCopiedTable(true);
+    setTimeout(() => setCopiedTable(false), 2000);
+  };
+
+  const handleDownloadTable = () => {
+    if (!formData.structured_tables) return;
+    const blob = new Blob([formData.structured_tables], { type: 'text/markdown;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    const baseName = (formData.filename || 'measurement_tables').replace(/\.[^/.]+$/, '');
+    link.download = `${baseName}_tables.md`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
   return (
     <div className="flex flex-col h-full bg-slate-900/95 border border-slate-800 rounded-xl overflow-hidden shadow-2xl backdrop-blur-md">
       {/* Header Bar */}
@@ -232,6 +331,22 @@ export default function FormEditor({ record, onRecordUpdated }) {
       {/* Tabs */}
       <div className="flex items-center px-4 bg-slate-900 border-b border-slate-800 space-x-1 overflow-x-auto text-xs">
         <button
+          onClick={() => setActiveTab('tables')}
+          className={`flex items-center space-x-1.5 px-3 py-2.5 border-b-2 font-medium transition shrink-0 ${
+            activeTab === 'tables'
+              ? 'border-emerald-500 text-emerald-400'
+              : 'border-transparent text-slate-400 hover:text-slate-200'
+          }`}
+        >
+          <span>📊 Measurement Tables</span>
+          {formData.structured_tables && (
+            <span className="ml-1 text-[10px] px-1.5 py-0.5 bg-emerald-950 text-emerald-300 border border-emerald-800 rounded font-medium">
+              Ready
+            </span>
+          )}
+        </button>
+
+        <button
           onClick={() => setActiveTab('raw_text')}
           className={`flex items-center space-x-1.5 px-3 py-2.5 border-b-2 font-medium transition shrink-0 ${
             activeTab === 'raw_text'
@@ -310,6 +425,66 @@ export default function FormEditor({ record, onRecordUpdated }) {
 
       {/* Form Content Body */}
       <div className="flex-1 overflow-y-auto p-5 space-y-6 text-xs">
+        {/* TAB: MEASUREMENT TABLES */}
+        {activeTab === 'tables' && (
+          <div className="space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-2 p-3 bg-slate-950/80 border border-slate-800 rounded-xl">
+              <div className="flex items-center space-x-2">
+                <span className="font-semibold text-slate-200 text-xs">
+                  Reconstructed Measurement Tables
+                </span>
+                <span className="text-[10px] px-2 py-0.5 bg-emerald-950/70 text-emerald-400 border border-emerald-800 rounded font-mono">
+                  Qwen 2.5 Coder GPU Engine
+                </span>
+              </div>
+
+              {formData.structured_tables && (
+                <div className="flex items-center space-x-2">
+                  <button
+                    type="button"
+                    onClick={handleCopyTable}
+                    className="flex items-center space-x-1.5 px-3 py-1 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 hover:text-white rounded-lg text-xs font-medium transition shadow-sm"
+                  >
+                    {copiedTable ? (
+                      <>
+                        <CheckCheck className="w-3.5 h-3.5 text-emerald-400" />
+                        <span className="text-emerald-400 font-medium">Copied!</span>
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="w-3.5 h-3.5 text-sky-400" />
+                        <span>Copy Markdown</span>
+                      </>
+                    )}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handleDownloadTable}
+                    className="flex items-center space-x-1.5 px-3 py-1 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 hover:text-white rounded-lg text-xs font-medium transition shadow-sm"
+                  >
+                    <Download className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>Download .md</span>
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {formData.structured_tables ? (
+              <div className="bg-slate-950/90 border border-slate-800 rounded-xl p-5 shadow-inner">
+                <MarkdownTableRenderer markdown={formData.structured_tables} />
+              </div>
+            ) : (
+              <div className="p-8 text-center bg-slate-950/60 border border-slate-800 rounded-xl text-slate-400">
+                <p className="text-sm font-medium text-slate-300">No measurement tables extracted for this document</p>
+                <p className="text-xs text-slate-500 mt-1">
+                  Upload a test datasheet or logsheet (e.g. Loss Measurement, Pressure Test) to extract tabular grids.
+                </p>
+              </div>
+            )}
+          </div>
+        )}
+
         {/* TAB 0: RAW EXTRACTED TEXT */}
         {activeTab === 'raw_text' && (
           <div className="space-y-4">

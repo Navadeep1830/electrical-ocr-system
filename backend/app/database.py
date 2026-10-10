@@ -23,6 +23,7 @@ def init_db() -> None:
                 ("document_type", "VARCHAR DEFAULT 'CUSTOMER_REQUEST_FORM'"),
                 ("is_valid_crf", "BOOLEAN DEFAULT 1"),
                 ("validation_message", "VARCHAR"),
+                ("structured_tables", "TEXT"),
                 ("raw_extracted_text", "VARCHAR"),
             ]
             for col_name, col_def in columns_to_add:

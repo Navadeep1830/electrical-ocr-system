@@ -28,7 +28,7 @@ from app.schemas import (
     ProcessExistingFileRequest, FormExtractionData
 )
 from app.parser import ElectricalRatingParser
-from app.vlm_service import vlm_engine
+from app.vlm_service import vlm_engine, auto_orient_image
 
 logger = logging.getLogger("main")
 logging.basicConfig(level=logging.INFO)
@@ -95,6 +95,7 @@ def render_pdf_pages(pdf_path: Path, record_prefix: str) -> List[dict]:
                 embedded_text = ""
 
             rendered_image = page.render(scale=scale).to_pil()
+            rendered_image = auto_orient_image(rendered_image)
             rendered_image.save(out_path, format="PNG", optimize=True)
 
             w, h = rendered_image.size
@@ -165,7 +166,7 @@ def process_and_save_document(
         rendered_pages = render_pdf_pages(file_path, record_prefix)
     else:
         # Direct image file
-        img = Image.open(file_path)
+        img = auto_orient_image(Image.open(file_path))
         out_filename = f"{record_prefix}_page_1.png"
         out_path = PAGES_DIR / out_filename
         img.save(out_path, format="PNG")
@@ -240,6 +241,7 @@ def process_and_save_document(
         document_type=extraction.document_type,
         is_valid_crf=extraction.is_valid_crf,
         validation_message=extraction.validation_message,
+        structured_tables=extraction.structured_tables,
         raw_extracted_text=extraction.raw_extracted_text,
         raw_extraction_json=json.dumps(extraction.model_dump(), default=str),
         confidence_scores_json=json.dumps(extraction.confidence_scores),
@@ -340,6 +342,7 @@ def format_record_response(record: FormRecord) -> FormRecordResponse:
         document_type=record.document_type,
         is_valid_crf=record.is_valid_crf,
         validation_message=record.validation_message,
+        structured_tables=record.structured_tables,
         raw_extracted_text=record.raw_extracted_text,
         verified_by=record.verified_by,
         verification_timestamp=record.verification_timestamp,
