@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { 
   FileText, Upload, FolderUp, CheckCircle, AlertTriangle, 
-  Cpu, ArrowLeft, RefreshCw, Zap, Shield, Search, Database, HardDrive, Check, Trash2
+  Cpu, ArrowLeft, RefreshCw, Zap, Shield, Search, Database, HardDrive, Check, Trash2, Loader2
 } from 'lucide-react';
 import { 
   getHealth, getRecords, getRecord, uploadDocument, 
@@ -22,6 +22,7 @@ export default function App() {
   
   // Modals & Upload state
   const [uploadProgress, setUploadProgress] = useState(0);
+  const [uploadPhase, setUploadPhase] = useState('idle'); // 'idle' | 'uploading' | 'processing'
   const [isUploading, setIsUploading] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
   const [showScanModal, setShowScanModal] = useState(false);
@@ -93,11 +94,15 @@ export default function App() {
     if (!file) return;
     try {
       setIsUploading(true);
+      setUploadPhase('uploading');
       setUploadProgress(15);
       const record = await uploadDocument(file, (progressEvent) => {
         if (progressEvent.total) {
           const percent = Math.round((progressEvent.loaded * 100) / progressEvent.total);
           setUploadProgress(percent);
+          if (percent >= 90) {
+            setUploadPhase('processing');
+          }
         }
       });
       fetchRecords();
@@ -106,6 +111,7 @@ export default function App() {
       alert('Upload & OCR extraction failed: ' + (err.response?.data?.detail || err.message));
     } finally {
       setIsUploading(false);
+      setUploadPhase('idle');
       setUploadProgress(0);
       if (fileInputRef.current) fileInputRef.current.value = '';
     }
@@ -348,34 +354,74 @@ export default function App() {
                   : 'border-slate-700/80 hover:border-sky-500/80 bg-slate-900/60 hover:bg-slate-900/90 shadow-lg'
               }`}
             >
-              <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-sky-600/30 to-indigo-600/30 border border-sky-500/40 flex items-center justify-center mb-3 group-hover:scale-110 transition duration-300 shadow-lg shadow-sky-600/20">
-                <Upload className="w-7 h-7 text-sky-400" />
-              </div>
-              <h3 className="text-base font-semibold text-slate-100 tracking-tight">
-                {isUploading ? `Extracting Text... (${uploadProgress}%)` : 'Upload Any PDF Document to Extract Text'}
-              </h3>
-              <p className="text-xs text-slate-400 mt-1 max-w-lg">
-                Drag and drop your PDF here, or click to browse. The air-gapped Qwen2.5-VL & OCR engine will automatically transcribe printed text, handwritten notes, and tables with maximum accuracy.
-              </p>
-              <div className="flex flex-wrap items-center justify-center gap-2.5 mt-4">
-                <span className="px-2.5 py-1 bg-slate-800 text-slate-300 rounded-lg text-[11px] font-mono border border-slate-700">
-                  PDF, PNG, JPG, TIFF
-                </span>
-                <span className="px-2.5 py-1 bg-emerald-950/60 text-emerald-400 rounded-lg text-[11px] font-medium border border-emerald-800/60">
-                  ⚡ 100% Local GPU Processing
-                </span>
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setShowScanModal(true);
-                  }}
-                  className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-sky-300 hover:text-sky-200 rounded-lg text-[11px] font-medium border border-slate-700 transition flex items-center space-x-1"
-                >
-                  <HardDrive className="w-3.5 h-3.5 text-sky-400" />
-                  <span>Scan Local File Path</span>
-                </button>
-              </div>
+              {isUploading ? (
+                <div className="flex flex-col items-center justify-center py-3 w-full">
+                  <div className="relative mb-4">
+                    <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-indigo-500/20 to-sky-500/20 border border-sky-500/50 flex items-center justify-center shadow-lg shadow-sky-500/20">
+                      <Cpu className="w-8 h-8 text-sky-400 animate-spin" style={{ animationDuration: '4s' }} />
+                    </div>
+                    <span className="absolute -top-1 -right-1 flex h-3 w-3">
+                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-sky-400 opacity-75"></span>
+                      <span className="relative inline-flex rounded-full h-3 w-3 bg-sky-500"></span>
+                    </span>
+                  </div>
+
+                  <h3 className="text-base font-semibold text-sky-200 tracking-tight flex items-center gap-2">
+                    <Loader2 className="w-4 h-4 animate-spin text-sky-400" />
+                    {uploadPhase === 'uploading' && uploadProgress < 75
+                      ? `Uploading Document (${uploadProgress}%)...`
+                      : 'Running Local AI Vision Model & OCR on GPU...'}
+                  </h3>
+
+                  <p className="text-xs text-slate-300 mt-2 max-w-md text-center">
+                    Rendering pages at 300 DPI • Transcribing text with Qwen2.5-VL-3B-Instruct & adaptive OCR (~15–25s)
+                  </p>
+
+                  <div className="w-full max-w-sm bg-slate-800 rounded-full h-2 mt-4 overflow-hidden border border-slate-700">
+                    <div
+                      className="bg-gradient-to-r from-sky-500 via-indigo-500 to-emerald-400 h-2 rounded-full transition-all duration-500 animate-pulse"
+                      style={{ width: uploadPhase === 'processing' || uploadProgress >= 75 ? '94%' : `${Math.max(uploadProgress, 20)}%` }}
+                    />
+                  </div>
+
+                  <span className="text-[11px] text-slate-400 mt-2 font-mono">
+                    {uploadPhase === 'processing' || uploadProgress >= 75
+                      ? '⚡ Air-gapped GPU inference in progress • Generating verified data'
+                      : `Network transfer: ${uploadProgress}%`}
+                  </span>
+                </div>
+              ) : (
+                <>
+                  <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-sky-600/30 to-indigo-600/30 border border-sky-500/40 flex items-center justify-center mb-3 group-hover:scale-110 transition duration-300 shadow-lg shadow-sky-600/20">
+                    <Upload className="w-7 h-7 text-sky-400" />
+                  </div>
+                  <h3 className="text-base font-semibold text-slate-100 tracking-tight">
+                    Upload Any PDF Document to Extract Text
+                  </h3>
+                  <p className="text-xs text-slate-400 mt-1 max-w-lg">
+                    Drag and drop your PDF here, or click to browse. The air-gapped Qwen2.5-VL & OCR engine will automatically transcribe printed text, handwritten notes, and tables with maximum accuracy.
+                  </p>
+                  <div className="flex flex-wrap items-center justify-center gap-2.5 mt-4">
+                    <span className="px-2.5 py-1 bg-slate-800 text-slate-300 rounded-lg text-[11px] font-mono border border-slate-700">
+                      PDF, PNG, JPG, TIFF
+                    </span>
+                    <span className="px-2.5 py-1 bg-emerald-950/60 text-emerald-400 rounded-lg text-[11px] font-medium border border-emerald-800/60">
+                      ⚡ 100% Local GPU Processing
+                    </span>
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setShowScanModal(true);
+                      }}
+                      className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-sky-300 hover:text-sky-200 rounded-lg text-[11px] font-medium border border-slate-700 transition flex items-center space-x-1"
+                    >
+                      <HardDrive className="w-3.5 h-3.5 text-sky-400" />
+                      <span>Scan Local File Path</span>
+                    </button>
+                  </div>
+                </>
+              )}
             </div>
 
             {/* Records Data Table */}
