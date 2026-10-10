@@ -29,6 +29,7 @@ from app.schemas import (
 )
 from app.parser import ElectricalRatingParser
 from app.vlm_service import vlm_engine, auto_orient_image
+from app.trocr_service import trocr_service
 
 logger = logging.getLogger("main")
 logging.basicConfig(level=logging.INFO)
@@ -360,8 +361,9 @@ def format_record_response(record: FormRecord) -> FormRecordResponse:
 
 @app.get("/api/health")
 def get_system_health():
-    """Return system readiness, GPU metrics, VLM status, and database info."""
+    """Return system readiness, GPU metrics, VLM status, TrOCR status, and database info."""
     vlm_stat = vlm_engine.get_status()
+    trocr_stat = trocr_service.get_status()
     return {
         "status": "healthy",
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -370,6 +372,7 @@ def get_system_health():
             "exists": DB_PATH.exists(),
         },
         "vlm_engine": vlm_stat,
+        "trocr_service": trocr_stat,
     }
 
 
@@ -378,6 +381,35 @@ def trigger_vlm_load():
     """Trigger background loading of the local VLM model."""
     vlm_engine.load_model(async_load=True)
     return {"message": "VLM model loading initiated in background", "status": vlm_engine.get_status()}
+
+
+@app.post("/api/trocr/recognize")
+async def recognize_handwriting_crop(file: UploadFile = File(...)):
+    """Recognize handwritten numbers, symbols, and words (e.g. Ohms, kVA) from a cropped image."""
+    try:
+        image = Image.open(file.file).convert("RGB")
+        recognized_text = trocr_service.recognize_crop(image)
+        return {
+            "model": "microsoft/trocr-base-handwritten",
+            "recognized_text": recognized_text
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"TrOCR recognition failed: {exc}")
+
+
+@app.post("/api/trocr/extract-page")
+async def extract_handwriting_from_page(file: UploadFile = File(...)):
+    """Detect and transcribe all handwritten regions and numerical cells on a page using TrOCR."""
+    try:
+        image = Image.open(file.file).convert("RGB")
+        regions = trocr_service.extract_handwritten_numbers_and_words(image)
+        return {
+            "model": "microsoft/trocr-base-handwritten",
+            "total_regions": len(regions),
+            "regions": regions
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Page extraction failed: {exc}")
 
 
 @app.post("/api/upload", response_model=FormRecordResponse)

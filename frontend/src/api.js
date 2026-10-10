@@ -79,4 +79,22 @@ export const batchScan = async (folderPath) => {
   return resp.data;
 };
 
+export const recognizeHandwritingCrop = async (file) => {
+  const formData = new FormData();
+  formData.append('file', file);
+  const resp = await client.post('/api/trocr/recognize', formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  });
+  return resp.data;
+};
+
+export const extractHandwritingPage = async (file) => {
+  const formData = new FormData();
+  formData.append('file', file);
+  const resp = await client.post('/api/trocr/extract-page', formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  });
+  return resp.data;
+};
+
 export default client;

@@ -563,6 +563,7 @@ CRITICAL: Return ONLY the valid JSON block without introductory or conversationa
                 f"You are an expert document OCR and technical specification analysis AI.\n"
                 f"Analyze this electrical test / engineering document page (Page {page_num} of {total_pages}) with extreme accuracy.\n"
                 f"Carefully extract all printed text, handwritten entries (names, ratings, numbers), checkboxes ([√] or [ ]), and tables.\n"
+                f"Pay special attention to resistance measurements, Ohms (Ω), milli-Ohms, micro-Ohms, voltage ratios, tap positions, currents, watts, and all numerical digits.\n"
                 f"CRITICAL: Do NOT invent placeholder dots ('...') or random bars ('|'). Output the exact text and numbers.\n\n"
                 f"Return a valid JSON object with the following fields:\n"
                 f"{{\n"
