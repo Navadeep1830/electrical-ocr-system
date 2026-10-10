@@ -608,8 +608,21 @@ def export_record_data(record_id: int, format: str = Query("json"), session: Ses
         writer = csv.writer(output)
         writer.writerow(["Field", "Value"])
         for k, v in resp_data.items():
-            if k not in ("pages", "confidence_scores"):
+            if k not in ("pages", "confidence_scores", "structured_tables", "raw_extracted_text"):
                 writer.writerow([k, str(v) if v is not None else ""])
+
+        # Append structured measurement tables if available
+        if record.structured_tables:
+            writer.writerow([])
+            writer.writerow(["=== EXTRACTED MEASUREMENT TABLES ==="])
+            for line in record.structured_tables.strip().split("\n"):
+                line = line.strip()
+                if line.startswith("|") and line.endswith("|"):
+                    cells = [c.strip() for c in line[1:-1].split("|")]
+                    if all(set(c).issubset({"-", ":", " "}) for c in cells):
+                        continue
+                    writer.writerow(cells)
+
         output.seek(0)
         from fastapi.responses import Response
         return Response(
@@ -619,6 +632,12 @@ def export_record_data(record_id: int, format: str = Query("json"), session: Ses
         )
 
     return resp_data
+
+
+@app.get("/api/records/{record_id}/export/csv")
+def export_record_csv(record_id: int, session: Session = Depends(get_session)):
+    """Direct CSV download route for record fields and measurement tables."""
+    return export_record_data(record_id=record_id, format="csv", session=session)
 
 
 @app.post("/api/batch-scan")

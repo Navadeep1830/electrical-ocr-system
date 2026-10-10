@@ -59,6 +59,12 @@ class ElectricalRatingParser:
         if not text:
             return ElectricalRatingDisaggregated()
 
+        try:
+            from app.electronics import repair_numeric_measurement
+            text = repair_numeric_measurement(text)
+        except Exception:
+            pass
+
         power_kva = cls.extract_power_kva(text)
         hv_kv, lv_kv = cls.extract_voltages(text)
         phases = cls.extract_phase_count(text)
