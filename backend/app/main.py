@@ -30,6 +30,7 @@ from app.schemas import (
 from app.parser import ElectricalRatingParser
 from app.vlm_service import vlm_engine, auto_orient_image
 from app.trocr_service import trocr_service
+from app.gemini_service import gemini_service
 
 logger = logging.getLogger("main")
 logging.basicConfig(level=logging.INFO)
@@ -180,10 +181,20 @@ def process_and_save_document(
             "embedded_text": "",
         }]
 
-    # Run VLM / OCR extraction
+    # Run VLM / OCR extraction (Gemini 3.8 Flash primary with local Qwen2.5-VL / TrOCR fallback)
     page_img_paths = [p["file_path"] for p in rendered_pages]
     embedded_texts = {p["page_number"]: p.get("embedded_text", "") for p in rendered_pages}
-    extraction: FormExtractionData = vlm_engine.extract_document(page_img_paths, embedded_texts=embedded_texts)
+
+    extraction: Optional[FormExtractionData] = None
+    if gemini_service.is_available():
+        try:
+            logger.info("Executing Gemini 3.8 Flash high-precision document and table extraction...")
+            extraction = gemini_service.extract_document(page_img_paths)
+        except Exception as exc:
+            logger.warning(f"Gemini service extraction failed: {exc}. Falling back to local VLM engine.")
+
+    if not extraction:
+        extraction = vlm_engine.extract_document(page_img_paths, embedded_texts=embedded_texts)
 
     # Disaggregate ratings
     disagg = extraction.ratings or ElectricalRatingParser.parse_ratings(
@@ -361,7 +372,7 @@ def format_record_response(record: FormRecord) -> FormRecordResponse:
 
 @app.get("/api/health")
 def get_system_health():
-    """Return system readiness, GPU metrics, VLM status, TrOCR status, and database info."""
+    """Return system readiness, GPU metrics, VLM status, TrOCR status, Gemini status, and database info."""
     vlm_stat = vlm_engine.get_status()
     trocr_stat = trocr_service.get_status()
     return {
@@ -373,6 +384,10 @@ def get_system_health():
         },
         "vlm_engine": vlm_stat,
         "trocr_service": trocr_stat,
+        "gemini_service": {
+            "available": gemini_service.is_available(),
+            "model": gemini_service.model
+        }
     }
 
 

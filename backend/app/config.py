@@ -36,3 +36,15 @@ PDF_RENDER_DPI = int(os.getenv("PDF_RENDER_DPI", "300"))
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "8000"))
 DEBUG = os.getenv("DEBUG", "false").lower() in ("true", "1")
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv(PROJECT_ROOT / ".env")
+    load_dotenv(BACKEND_DIR / ".env")
+except ImportError:
+    pass
+
+# Gemini Cloud Vision Configuration
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
+
