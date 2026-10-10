@@ -8,7 +8,7 @@ class ElectricalRatingParser:
 
     # Regex patterns for electrical parameters
     POWER_PATTERN = re.compile(
-        r'(\d+(?:\.\d+)?)\s*(kVA|MVA|kva|mva|KVA|Mva|kW|kw|KW|VA|va|W)\b',
+        r'(\d+(?:\.\d+)?)\s*(kVA|MVA|kva|mva|KVA|Mva|kW|kw|KW|VA|va|W|kUA|KUA|kua)\b',
         re.IGNORECASE
     )
 
@@ -105,6 +105,19 @@ class ElectricalRatingParser:
                 lv_str = explicit_kv_v.group(2)
                 lv_val = float('0' + lv_str) if lv_str.startswith('.') else float(lv_str)
                 if lv_val > 50:  # e.g. 433 V
+                    lv_val = lv_val / 1000.0
+                return round(hv_val, 3), round(lv_val, 4)
+            except ValueError:
+                pass
+
+        # Check comma or hyphen separated e.g. 11 KV, 433V or 11 kV - 433 V
+        comma_sep = re.search(r'(\d+(?:\.\d+)?)\s*(?:kV|KV)\s*[,;\/\-\s]+\s*(\.?\d+(?:\.\d+)?)\s*(?:kV|KV|V|v)?\b', text)
+        if comma_sep:
+            try:
+                hv_val = float(comma_sep.group(1))
+                lv_str = comma_sep.group(2)
+                lv_val = float('0' + lv_str) if lv_str.startswith('.') else float(lv_str)
+                if lv_val > 50:  # e.g. 433 V -> 0.433 kV
                     lv_val = lv_val / 1000.0
                 return round(hv_val, 3), round(lv_val, 4)
             except ValueError:
@@ -236,7 +249,7 @@ class FormLayoutRuleParser:
 
         # Customer Name & Address
         cust_m = re.search(
-            r'Name\s*(?:and|&)\s*Address\s*of\s*the\s*Customer\s*[:\s]*([\s\S]*?)(?=Sample\(s\)|Rating|Description)',
+            r'Name\s*(?:and|&)?\s*Address\s*of\s*(?:the\s*)?Customer\s*[:\s]*([\s\S]*?)(?=Sample\(s\)|Samples|Rating|Description|\n\s*[A-Z][a-z]+:)',
             page1,
             re.IGNORECASE
         )
@@ -250,7 +263,7 @@ class FormLayoutRuleParser:
 
         # Sample to be tested
         sample_m = re.search(
-            r'Sample\(s\)\s*to\s*be\s*tested\s*[:\s]*([^\n\r]+)',
+            r'Sample(?:s|\(s\))?\s*to\s*be\s*tested\s*[:\s]*([^\n\r]+)',
             page1,
             re.IGNORECASE
         )
@@ -262,7 +275,7 @@ class FormLayoutRuleParser:
 
         # Rating of sample
         rating_m = re.search(
-            r'Rating\s*of\s*the\s*sample\(s\)\s*(?:to\s*be\s*tested)?\s*[:\s]*([\s\S]*?)(?=Description|Type|Serial)',
+            r'Rating\s*of\s*(?:the\s*)?sample(?:s|\(s\))?\s*(?:tested|to\s*be\s*tested)?\s*[:\s]*([\s\S]*?)(?=Description|Type|Serial|\n\s*[A-Z][a-z]+:)',
             page1,
             re.IGNORECASE
         )
@@ -271,7 +284,7 @@ class FormLayoutRuleParser:
 
         # Description
         desc_m = re.search(
-            r'Description\s*of\s*(?:the\s*)?test\s*sample\(s\)\s*[:\s]*([\s\S]*?)(?=Type|Serial|Manufacturer)',
+            r'Description\s*of\s*(?:the\s*)?test\s*sample(?:s|\(s\))?\s*[:\s]*([\s\S]*?)(?=Type|Serial|Manufacturer|\n\s*[A-Z][a-z]+:)',
             page1,
             re.IGNORECASE
         )
@@ -289,7 +302,7 @@ class FormLayoutRuleParser:
 
         # Serial Number
         sr_m = re.search(
-            r'Serial\s*Number\(s\)\s*[:\s]*([^\n\r]+)',
+            r'Serial\s*Number\s*(?:s|\(s\))?\s*[:\s]*([^\n\r]+)',
             page1,
             re.IGNORECASE
         )
@@ -298,7 +311,7 @@ class FormLayoutRuleParser:
 
         # Manufacturer Details
         mfg_m = re.search(
-            r'Manufacturer[\'’]?s?\s*Details\s*[:\s]*([\s\S]*?)(?=Drawing|Customer|\n\s*Criteria)',
+            r'Manufacturer[\'’]?s?\s*Details\s*[:\s]*([\s\S]*?)(?=Drawing|Customer|\n\s*Criteria|\n\s*[A-Z][a-z]+:)',
             page1,
             re.IGNORECASE
         )
@@ -307,7 +320,7 @@ class FormLayoutRuleParser:
 
         # Drawing Number
         drw_m = re.search(
-            r'Drawing\s*Number\(s\)\s*[:\s]*([^\n\r]+)',
+            r'Drawing\s*Number\s*(?:s|\(s\))?\s*[:\s]*([^\n\r]+)',
             page1,
             re.IGNORECASE
         )
@@ -334,21 +347,30 @@ class FormLayoutRuleParser:
 
         # Tests requested
         tests_m = re.search(
-            r'Details\s*of\s*test\(s\)\s*requested\s*[:\s]*([\s\S]*?)(?=Specific|Name\s*of\s*the\s*witnessing|Test\s*Report)',
+            r'(?:Details\s*of\s*)?Test(?:s|\(s\))?\s*requested\s*[:\s]*([\s\S]*?)(?=Specific|Name\s*of\s*(?:the\s*)?witnessing|Designation|Test\s*Report|\n\s*[A-Z][a-z]+:)',
             page1,
             re.IGNORECASE
         )
         if tests_m:
             data["tests_requested"] = " ".join(tests_m.group(1).split()).strip()
 
-        # Witnessing persons
+        # Witnessing persons / Customer Representative
         witness_m = re.search(
-            r'Customer[\'’]?s?\s*Representative\s*[:\s]*([^\n\r]+)',
+            r'(?:Customer[\'’]?s?\s*Representative|Name\s*of\s*(?:the\s*)?witnessing\s*person)\s*[:\s]*([^\n\r]+)',
             page1,
             re.IGNORECASE
         )
         if witness_m:
             data["customer_representative"] = witness_m.group(1).strip()
+
+        # Test report dispatched to
+        disp_m = re.search(
+            r'Test\s*Report\s*to\s*be\s*dispatched\s*to\s*[:\s]*([^\n\r]+)',
+            page1,
+            re.IGNORECASE
+        )
+        if disp_m:
+            data["report_dispatch_to"] = disp_m.group(1).strip()
 
         # Sample storage / disposal
         if re.search(r'Taking\s*back\s*the\s*sample.*?(?:Yes|\/|\[x\])', page1, re.IGNORECASE):

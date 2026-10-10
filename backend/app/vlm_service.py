@@ -339,11 +339,18 @@ Your tasks:
 1. Identify the Document Type and Format Number (e.g. CPRI Customer Request Form CPRI/QAF/01A, Transformer Loss Measurement Datasheet, Pressure Test Logsheet, Routine Test Logsheet, etc.).
 2. Extract all metadata into structured fields:
    - "customer_name": Customer / manufacturer company name
-   - "customer_address": Customer address
-   - "rating_raw": Complete electrical rating string (e.g. 250 KVA/11kV/433V, 3PH, 50Hz Copperwound)
-   - "sample_name": Equipment or sample description
-   - "serial_number": Serial number or sample ID (e.g. 1098 or HVD25S0847)
-   - "tests_requested": Tests requested or test category
+   - "customer_address": Customer full address
+   - "sample_name": Equipment or sample description (e.g. 3 Phase Distribution Transformer)
+   - "rating_raw": Complete electrical rating string (e.g. 250 kVA / 11 kV / 433 V, 3PH, 50 Hz copper wound)
+   - "sample_description": Sample description including tapping details
+   - "sample_type": Equipment type (e.g. ONAN outdoor Type Distribution Transformer)
+   - "serial_number": Serial number or sample code (e.g. 1098 or HVD25S0847)
+   - "manufacturer_details": Manufacturer details and specifications
+   - "drawing_number": Drawing numbers
+   - "tests_requested": Tests requested or test category (e.g. Type test, Routine test)
+   - "customer_representative": Customer representative / witnessing person
+   - "report_dispatch_to": Report dispatch address or instructions
+   - "conformity_rule": Conformity decision rule statement
    - "format_no": Document format number
 3. Reconstruct ALL measurement, calibration, and test data tables into clean, aligned Markdown tables with their EXACT headers, units, and all numeric values preserved.
 4. Output a clean, complete full transcription with the structured tables included. Do NOT output placeholder headers like 'Column 1 | Column 2'. Use the actual headers from the text.
@@ -357,8 +364,15 @@ Return a valid JSON object with EXACTLY this structure:
   "customer_address": "...",
   "sample_name": "...",
   "rating_raw": "...",
+  "sample_description": "...",
+  "sample_type": "...",
   "serial_number": "...",
+  "manufacturer_details": "...",
+  "drawing_number": "...",
   "tests_requested": "...",
+  "customer_representative": "...",
+  "report_dispatch_to": "...",
+  "conformity_rule": "...",
   "structured_tables": "### Measurement Tables\\n\\n| Header 1 | Header 2 | ... |\\n|---|---|---|\\n| ... | ... | ... |",
   "full_transcription": "Complete text with structured tables included."
 }}
@@ -460,10 +474,16 @@ CRITICAL: Return ONLY the valid JSON block without introductory or conversationa
             doc_type = "PROFORMA_FOR_TRANSFORMERS"
             is_valid_crf = False
             val_msg = "Document identified as Proforma for Transformers. Technical specifications and test requirements extracted."
-        elif doc_type_src == "CUSTOMER_REQUEST_FORM" or "customer request form" in combined_text or "cpri/qaf/01a" in combined_text:
+        elif (
+            doc_type_src == "CUSTOMER_REQUEST_FORM" 
+            or "customer request form" in combined_text 
+            or "cpri/qaf/01a" in combined_text 
+            or "customer request" in combined_text
+            or bool((vlm_data or {}).get("customer_name"))
+        ):
             doc_type = "CUSTOMER_REQUEST_FORM"
             is_valid_crf = True
-            val_msg = "Valid CPRI/QAF/01A Customer Request Form detected. Field identification active."
+            val_msg = "Customer Request Form detected. All structured electrical fields identified."
         elif doc_type_src == "WORK_INSTRUCTION" or "work instruction" in combined_text or "cpri/qaf/02" in combined_text:
             doc_type = "WORK_INSTRUCTION"
             is_valid_crf = False
@@ -495,11 +515,21 @@ CRITICAL: Return ONLY the valid JSON block without introductory or conversationa
             if coder_data.get("structured_tables") and str(coder_data["structured_tables"]).strip():
                 structured_tables_md = str(coder_data["structured_tables"]).strip()
                 final_payload["structured_tables"] = structured_tables_md
-            for field in ["customer_name", "rating_raw", "serial_number", "sample_name", "tests_requested"]:
+            CRF_FIELDS_LIST = [
+                "customer_name", "customer_address", "sample_name", "sample_description",
+                "sample_type", "serial_number", "manufacturer_details", "drawing_number",
+                "customer_requirement", "evaluation_criteria", "number_of_samples",
+                "sample_disposal", "tests_requested", "specific_instructions",
+                "customer_representative", "witness_other", "report_dispatch_to",
+                "report_dispatch_mode", "additional_reports", "msme_discount",
+                "conformity_rule", "physical_condition_sample", "lab_capability",
+                "test_engineer_name", "deviations_noticed", "rating_raw"
+            ]
+            for field in CRF_FIELDS_LIST:
                 c_val = coder_data.get(field)
                 if isinstance(c_val, list):
                     c_val = ", ".join([str(v) for v in c_val])
-                if c_val and str(c_val).strip() and not str(c_val).strip().startswith("..."):
+                if c_val and str(c_val).strip() and str(c_val).strip().lower() not in ("none", "n/a", "...", "-", "null", ""):
                     if not final_payload.get(field) or len(str(final_payload.get(field)).strip()) < 3:
                         final_payload[field] = str(c_val).strip()
             if coder_data.get("document_type") and coder_data["document_type"] != "GENERAL_DOCUMENT":
@@ -562,12 +592,43 @@ CRITICAL: Return ONLY the valid JSON block without introductory or conversationa
             img = Image.open(image_path).convert("RGB")
 
             prompt = (
-                f"You are an expert document OCR and technical specification analysis AI.\n"
-                f"Analyze this electrical test / engineering document page (Page {page_num} of {total_pages}) with extreme accuracy.\n"
-                f"Carefully extract all printed text, handwritten entries (names, ratings, numbers), checkboxes ([✓] or [ ]), and tables into clean Markdown.\n"
-                f"Pay special attention to resistance measurements, Ohms (Ω), milli-Ohms, micro-Ohms, voltage ratios, tap positions, currents, watts, and all numerical digits.\n"
-                f"List all fields with their handwritten values. For tables, format in clean Markdown tables.\n"
-                f"Do NOT invent placeholder dots ('...') or generate repetitive empty table cells or endless pipe symbols.\n"
+                f"You are an expert electrical test document OCR and forensic analysis engine.\n"
+                f"Analyze this document page (Page {page_num} of {total_pages}) with extreme accuracy.\n"
+                f"Carefully transcribe all printed headers/labels and ALL handwritten entries (names, addresses, ratings, numbers), checkboxes ([✓] or [ ]), and tables.\n"
+                f"Output a single valid JSON object with the following fields (set to null or \"\" ONLY if not present on this page):\n"
+                f"{{\n"
+                f"  \"document_type\": \"CUSTOMER_REQUEST_FORM\", \"PROFORMA_FOR_TRANSFORMERS\", \"LOGSHEET\", \"DATASHEET\", \"WORK_INSTRUCTION\", or \"GENERAL_DOCUMENT\",\n"
+                f"  \"customer_name\": \"exact customer company or client name (e.g. A.P. TRANSFORMERS, Schneider Electric)\",\n"
+                f"  \"customer_address\": \"full customer address including city and pin code\",\n"
+                f"  \"sample_name\": \"sample name / equipment description (e.g. 3 Phase Distribution Transformer)\",\n"
+                f"  \"rating_raw\": \"complete electrical rating string (e.g. 250 kVA / 11 kV / 433 V, 3PH, 50 Hz copper wound)\",\n"
+                f"  \"sample_description\": \"description of test sample including tapping and outdoor/indoor details\",\n"
+                f"  \"sample_type\": \"type (e.g. ONAN outdoor Type Distribution Transformer, Non-sealed Type)\",\n"
+                f"  \"serial_number\": \"serial number / sample code (e.g. 1098)\",\n"
+                f"  \"manufacturer_details\": \"manufacturer details and full rating specifications\",\n"
+                f"  \"drawing_number\": \"drawing numbers (e.g. APT/250-11/001)\",\n"
+                f"  \"customer_requirement\": \"customer requirement or standard specification\",\n"
+                f"  \"evaluation_criteria\": \"evaluation criteria (e.g. As per Standard)\",\n"
+                f"  \"number_of_samples\": \"number of samples (e.g. 1)\",\n"
+                f"  \"sample_disposal\": \"sample storage / handling / taking back after testing details\",\n"
+                f"  \"tests_requested\": \"details of test(s) requested (e.g. Type test, Routine test)\",\n"
+                f"  \"specific_instructions\": \"specific testing or mounting instructions\",\n"
+                f"  \"customer_representative\": \"name and designation of customer representative or witnessing person (e.g. Mr. Vivekanand Krishna)\",\n"
+                f"  \"witness_other\": \"witness details other than customer\",\n"
+                f"  \"report_dispatch_to\": \"report dispatch recipient or instructions (e.g. Handed over to person)\",\n"
+                f"  \"report_dispatch_mode\": \"dispatch mode\",\n"
+                f"  \"additional_reports\": \"number of additional reports\",\n"
+                f"  \"msme_discount\": \"Applicable or Not Applicable\",\n"
+                f"  \"conformity_required\": true,\n"
+                f"  \"conformity_rule\": \"conformity decision rule statement\",\n"
+                f"  \"physical_condition_sample\": \"physical condition of sample (e.g. Suitable for Testing)\",\n"
+                f"  \"lab_capability\": \"Yes or No\",\n"
+                f"  \"test_engineer_name\": \"name of testing engineer\",\n"
+                f"  \"deviations_noticed\": \"any deviations noticed\",\n"
+                f"  \"structured_tables\": \"reconstructed Markdown table of any test/measurement tables on this page, else null\",\n"
+                f"  \"transcription\": \"complete verbatim reading text of this page including all text and handwritten entries\"\n"
+                f"}}\n"
+                f"CRITICAL: Return ONLY the valid JSON block without introductory or concluding conversational prose."
             )
 
             messages = [
@@ -599,7 +660,7 @@ CRITICAL: Return ONLY the valid JSON block without introductory or conversationa
                     **inputs,
                     max_new_tokens=1600,
                     do_sample=False,
-                    repetition_penalty=1.2,
+                    repetition_penalty=1.15,
                 )
 
             generated_ids_trimmed = [
@@ -611,14 +672,14 @@ CRITICAL: Return ONLY the valid JSON block without introductory or conversationa
                 clean_up_tokenization_spaces=False
             )[0]
 
-            # Clean any trailing repetitive pipe sequences
-            output_text = re.sub(r'(\|\s*){3,}', ' ', output_text).strip()
-
             logger.info(f"Page {page_num} VLM inference completed ({len(output_text)} chars generated)")
 
             # Try parsing JSON if model returned JSON
             parsed = self._parse_json_from_text(output_text)
             if parsed:
+                # Ensure transcription exists
+                if not parsed.get("transcription") and not parsed.get("full_transcription"):
+                    parsed["transcription"] = output_text
                 return parsed
 
             # If model returned direct Markdown / text, wrap it cleanly so high-quality transcription is preserved
@@ -646,10 +707,10 @@ CRITICAL: Return ONLY the valid JSON block without introductory or conversationa
                 res = self._infer_vlm_page(img_path, page_num, total_pages)
                 if res:
                     page_results.append(res)
-                    tx = res.get("transcription") or ""
+                    tx = res.get("transcription") or res.get("full_transcription") or ""
                     if tx:
                         page_transcriptions[page_num] = tx
-                    tbl = res.get("tables_markdown") or ""
+                    tbl = res.get("structured_tables") or res.get("tables_markdown") or ""
                     if tbl and tbl.strip() and "|" in tbl:
                         all_tables.append(tbl.strip())
                 else:
@@ -664,14 +725,26 @@ CRITICAL: Return ONLY the valid JSON block without introductory or conversationa
                 "structured_tables": "\n\n".join(all_tables) if all_tables else None,
             }
 
-            # Extract best metadata across pages
+            # Extract best metadata across all pages for every CRF field
+            ALL_METADATA_KEYS = [
+                "document_type", "format_no", "issue_no", "revision_no", "date_of_issue",
+                "division_name", "customer_name", "customer_address", "sample_name",
+                "sample_description", "sample_type", "serial_number", "manufacturer_details",
+                "drawing_number", "customer_requirement", "evaluation_criteria",
+                "number_of_samples", "sample_disposal", "tests_requested", "specific_instructions",
+                "customer_representative", "witness_other", "report_dispatch_to",
+                "report_dispatch_mode", "additional_reports", "msme_discount",
+                "conformity_required", "conformity_rule", "physical_condition_sample",
+                "lab_capability", "external_service_details", "test_engineer_name",
+                "deviations_noticed", "rating_raw"
+            ]
+
             for res in page_results:
-                for k in ["document_type", "format_no", "customer_name", "customer_address", 
-                          "sample_name", "sample_description", "serial_number", "rating_raw", "tests_requested"]:
+                for k in ALL_METADATA_KEYS:
                     val = res.get(k)
                     if isinstance(val, list):
                         val = ", ".join([str(v) for v in val])
-                    if val and str(val).strip() and str(val).strip().lower() not in ("none", "n/a", "...", "-", ""):
+                    if val is not None and str(val).strip() and str(val).strip().lower() not in ("none", "n/a", "...", "-", "null", ""):
                         if k not in merged or len(str(val)) > len(str(merged.get(k, ""))):
                             merged[k] = val
 

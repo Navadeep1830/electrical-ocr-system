@@ -127,9 +127,11 @@ export default function FormEditor({ record, onRecordUpdated }) {
       });
       setSuccessMessage('');
       setErrorMessage('');
-      if (record.structured_tables) {
+      if (record.document_type === 'CUSTOMER_REQUEST_FORM' || record.customer_name || record.rating_raw) {
+        setActiveTab('customer');
+      } else if (record.structured_tables) {
         setActiveTab('tables');
-      } else if (record.is_valid_crf === false) {
+      } else {
         setActiveTab('raw_text');
       }
     }
@@ -146,6 +148,18 @@ export default function FormEditor({ record, onRecordUpdated }) {
   }
 
   const confidence = record.confidence_scores || {};
+
+  const filledFieldsCount = React.useMemo(() => {
+    if (!formData) return 0;
+    const fields = [
+      'customer_name', 'customer_address', 'sample_name', 'sample_description',
+      'sample_type', 'serial_number', 'manufacturer_details', 'drawing_number',
+      'tests_requested', 'customer_representative', 'rating_raw',
+      'power_rating_kva', 'voltage_hv_kv', 'voltage_lv_kv', 'phase_count', 'frequency_hz',
+      'cooling_type', 'winding_material', 'report_dispatch_to'
+    ];
+    return fields.filter(k => formData[k] !== null && formData[k] !== undefined && formData[k] !== '').length;
+  }, [formData]);
 
   const handleInputChange = (field, value) => {
     setFormData((prev) => ({ ...prev, [field]: value }));
@@ -295,36 +309,38 @@ export default function FormEditor({ record, onRecordUpdated }) {
         </div>
       </div>
 
-      {/* CRF Validation Status Banner */}
-      {formData.is_valid_crf === false ? (
+      {/* Document Validation & Auto-Fill Status Banner */}
+      {formData.is_valid_crf || filledFieldsCount > 0 ? (
+        <div className="mx-4 mt-2.5 px-3 py-2 bg-emerald-950/40 border border-emerald-700/50 rounded-lg text-emerald-300 text-xs flex items-center justify-between">
+          <div className="flex items-center space-x-2">
+            <CheckCircle className="w-4 h-4 text-emerald-400 shrink-0" />
+            <span className="text-[11px] font-medium">
+              {formData.document_type === 'CUSTOMER_REQUEST_FORM' || formData.customer_name ? 'Customer Request Form (CPRI/QAF/01A)' : formData.document_type || 'Electrical Document'}
+            </span>
+            <span className="text-[10px] bg-emerald-900/80 text-emerald-300 px-2 py-0.5 rounded border border-emerald-700 font-mono">
+              ✨ {filledFieldsCount} Fields Auto-Filled
+            </span>
+          </div>
+          <span className="text-[10px] bg-emerald-900/60 text-emerald-300 px-2 py-0.5 rounded border border-emerald-700 font-mono">
+            {formData.page_count} Pages Extracted
+          </span>
+        </div>
+      ) : (
         <div className="mx-4 mt-3 p-3 bg-amber-950/60 border border-amber-600/60 rounded-xl text-amber-200 shadow-md">
           <div className="flex items-start space-x-2.5">
             <AlertTriangle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
             <div className="flex-1">
               <div className="flex items-center space-x-2">
-                <span className="font-semibold text-xs text-amber-300">Non-CRF Document Detected</span>
+                <span className="font-semibold text-xs text-amber-300">Technical Test Document</span>
                 <span className="text-[10px] bg-amber-900/80 px-2 py-0.5 rounded text-amber-200 font-mono border border-amber-700/60">
-                  {formData.document_type || 'NON_CRF'}
+                  {formData.document_type || 'GENERAL'}
                 </span>
               </div>
               <p className="text-[11px] text-amber-200/90 mt-1">
-                {formData.validation_message || 'This document is not a standard CPRI Customer Request Form (CPRI/QAF/01A). Structured electrical fields are not required.'}
-              </p>
-              <p className="text-[11px] text-amber-300 font-medium mt-1">
-                Complete raw text was successfully extracted and is displayed in the <strong>Extracted Text</strong> tab below.
+                {formData.validation_message || 'Document processed. Measurement tables and OCR text are available across the tabs below.'}
               </p>
             </div>
           </div>
-        </div>
-      ) : (
-        <div className="mx-4 mt-2.5 px-3 py-1.5 bg-emerald-950/40 border border-emerald-700/50 rounded-lg text-emerald-300 text-xs flex items-center justify-between">
-          <div className="flex items-center space-x-2">
-            <CheckCircle className="w-4 h-4 text-emerald-400 shrink-0" />
-            <span className="text-[11px] font-medium">Valid CPRI Customer Request Form (CPRI/QAF/01A)</span>
-          </div>
-          <span className="text-[10px] bg-emerald-900/60 text-emerald-300 px-2 py-0.5 rounded border border-emerald-700 font-mono">
-            {formData.page_count} Pages Extracted
-          </span>
         </div>
       )}
 
